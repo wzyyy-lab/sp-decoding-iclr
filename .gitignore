@@ -1,0 +1,28 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Generated research data and model artifacts.
+artifacts/
+checkpoints/
+data/cache/
+outputs/
+runs/
+wandb/
+
+# Profiling output.
+*.nsys-rep
+*.ncu-rep
+
+# Local environments and editor state.
+.venv/
+.env
+.idea/
+.vscode/
+
+# External repositories keep their own history; experiment metadata records
+# their exact commits. Paper PDFs are local reading assets, not source files.
+third_party/
+papers/*.pdf

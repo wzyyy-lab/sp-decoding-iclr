@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dflash-survival-path"
+version = "0.1.0"
+description = "Single-chain, acceptance-aligned structured drafting for DFlash"
+requires-python = ">=3.10"
+dependencies = ["torch>=2.2"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

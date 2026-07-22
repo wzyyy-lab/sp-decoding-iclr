@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "updated": "2026-07-22",
+  "policy": {
+    "plumbing_smoke": "May establish only that code or environment runs; excluded from research claims.",
+    "development": "May guide an internal gate or configuration choice; excluded from final paper claims.",
+    "formal": "May support a paper claim only when protocol, data, code revision, raw output, and uncertainty estimate are frozen."
+  },
+  "completed_research_runs": [
+    {
+      "job_id": "10022338",
+      "tier": "development",
+      "gate": "gate1a_candidate_availability",
+      "artifact": "artifacts/analysis/candidate_ceiling_gate1_10022338.json",
+      "artifact_sha256": "b026d870e2569ca8dbf134ed5037cafc22788a1e95129d91266605c99ddfd464",
+      "manifest_sha256": "72d98c0e9d75150c599869c71151df4e27e179b6fdddcdf72b9f4331ca40f52d",
+      "allowed_claim": "The pure-DFlash top-K lattice has substantial gold-aware candidate headroom on probe_v1 canonical anchors."
+    },
+    {
+      "job_id": "10022436",
+      "tier": "development",
+      "gate": "dflash_domino_eager_baseline",
+      "artifact": "artifacts/baselines/qwen3_4b_10022436.json",
+      "artifact_sha256": "9c6bed500c928761ee13dcd46107e3e901808673ba2671d452cdd120bff11bcb",
+      "manifest_sha256": "72d98c0e9d75150c599869c71151df4e27e179b6fdddcdf72b9f4331ca40f52d",
+      "allowed_claim": "Domino improves matched-horizon eager acceptance on probe_v1; timing is diagnostic rather than final."
+    }
+  ],
+  "non_evidence_jobs": [
+    "10022278",
+    "10022310",
+    "10022330",
+    "10022343",
+    "10022412",
+    "10022468"
+  ],
+  "pending_gates": [
+    "gate0_target_equivalence",
+    "gate1b_same_anchor",
+    "development_head_probe"
+  ]
+}
