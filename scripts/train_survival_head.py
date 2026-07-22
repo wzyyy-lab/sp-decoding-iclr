@@ -500,7 +500,13 @@ def main() -> None:
         json.dumps(report, ensure_ascii=False, indent=2, default=str) + "\n",
         encoding="utf-8",
     )
-    print(json.dumps({key: value for key, value in report.items() if key != "history"}, indent=2))
+    print(
+        json.dumps(
+            {key: value for key, value in report.items() if key != "history"},
+            indent=2,
+            default=str,
+        )
+    )
 
 
 if __name__ == "__main__":
