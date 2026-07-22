@@ -17,6 +17,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--minimum-delta", type=float, default=0.2)
+    parser.add_argument(
+        "--evaluation-split",
+        choices=["test", "validation"],
+        default="test",
+    )
+    parser.add_argument(
+        "--minimum-base-delta",
+        type=float,
+        help="Optional second gate on global_survival minus the DFlash base.",
+    )
     return parser.parse_args()
 
 
@@ -49,10 +59,18 @@ def main() -> None:
     if not metrics_paths:
         raise FileNotFoundError(f"no */metrics.json files below {args.input}")
     runs = []
+    report_key = (
+        "final_test"
+        if args.evaluation_split == "test"
+        else "final_validation"
+    )
     for path in metrics_paths:
         report = json.loads(path.read_text())
         if report.get("evidence_tier") != "development":
             raise ValueError(f"unexpected evidence tier in {path}")
+        evaluation = report.get(report_key)
+        if evaluation is None:
+            raise ValueError(f"{report_key} was not evaluated in {path}")
         runs.append(
             {
                 "path": str(path.resolve()),
@@ -60,7 +78,9 @@ def main() -> None:
                 "normalization": report["normalization"],
                 "seed": int(report.get("seed", -1)),
                 "selected_epoch": int(report["selected_epoch"]),
-                "test": report["final_test"],
+                "evaluation_split": args.evaluation_split,
+                "evaluation": evaluation,
+                "test": report.get("final_test"),
                 "validation": report["final_validation"],
             }
         )
@@ -93,17 +113,23 @@ def main() -> None:
         for decoder in decoder_names:
             decoder_metrics[decoder] = metric_summary(
                 [
-                    float(run["test"][decoder]["mean_accepted_draft_tokens"])
+                    float(
+                        run["evaluation"][decoder][
+                            "mean_accepted_draft_tokens"
+                        ]
+                    )
                     for run in group
                 ]
             )
         disagreement_metrics = {}
-        for pair_name in group[0]["test"].get("decoder_disagreement", {}):
+        for pair_name in group[0]["evaluation"].get(
+            "decoder_disagreement", {}
+        ):
             disagreement_metrics[pair_name] = {
                 "path_disagreement_fraction": metric_summary(
                     [
                         float(
-                            run["test"]["decoder_disagreement"][pair_name][
+                            run["evaluation"]["decoder_disagreement"][pair_name][
                                 "path_disagreement_fraction"
                             ]
                         )
@@ -113,7 +139,7 @@ def main() -> None:
                 "first_token_disagreement_fraction": metric_summary(
                     [
                         float(
-                            run["test"]["decoder_disagreement"][pair_name][
+                            run["evaluation"]["decoder_disagreement"][pair_name][
                                 "first_token_disagreement_fraction"
                             ]
                         )
@@ -122,24 +148,46 @@ def main() -> None:
                 ),
             }
         global_vs_map = [
-            float(run["test"]["global_survival"]["mean_accepted_draft_tokens"])
-            - float(run["test"]["global_map"]["mean_accepted_draft_tokens"])
+            float(
+                run["evaluation"]["global_survival"][
+                    "mean_accepted_draft_tokens"
+                ]
+            )
+            - float(
+                run["evaluation"]["global_map"][
+                    "mean_accepted_draft_tokens"
+                ]
+            )
             for run in group
         ]
         global_vs_local_survival = [
-            float(run["test"]["global_survival"]["mean_accepted_draft_tokens"])
-            - float(run["test"]["local_survival"]["mean_accepted_draft_tokens"])
+            float(
+                run["evaluation"]["global_survival"][
+                    "mean_accepted_draft_tokens"
+                ]
+            )
+            - float(
+                run["evaluation"]["local_survival"][
+                    "mean_accepted_draft_tokens"
+                ]
+            )
             for run in group
         ]
         global_vs_base = [
-            float(run["test"]["global_survival"]["mean_accepted_draft_tokens"])
-            - float(run["test"]["base"]["mean_accepted_draft_tokens"])
+            float(
+                run["evaluation"]["global_survival"][
+                    "mean_accepted_draft_tokens"
+                ]
+            )
+            - float(
+                run["evaluation"]["base"]["mean_accepted_draft_tokens"]
+            )
             for run in group
         ]
         summaries[key] = {
             "seeds": [run["seed"] for run in group],
             "selected_epochs": [run["selected_epoch"] for run in group],
-            "test_eal": decoder_metrics,
+            f"{args.evaluation_split}_eal": decoder_metrics,
             "decoder_disagreement": disagreement_metrics,
             "deltas": {
                 "global_survival_minus_global_map": metric_summary(global_vs_map),
@@ -158,22 +206,42 @@ def main() -> None:
         primary_delta["mean"] >= args.minimum_delta
         and primary_delta["minimum"] > 0.0
     )
+    primary_base_delta = primary["deltas"]["global_survival_minus_base"]
+    if args.minimum_base_delta is not None:
+        probe_pass = bool(
+            probe_pass
+            and primary_base_delta["mean"] >= args.minimum_base_delta
+            and primary_base_delta["minimum"] > 0.0
+        )
     report = {
         "evidence_tier": "development_probe_only",
         "formal_claim_allowed": False,
         "reason": (
-            "The source collection has only 96 benchmark prompts and a "
-            "12-prompt test split; this probe may gate data scaling but cannot "
-            "support a paper claim."
+            "This is validation-selected development evidence. It may gate "
+            "data/model scaling but cannot support a paper claim or unseal "
+            "the reserved formal test."
+            if args.evaluation_split == "validation"
+            else (
+                "The source collection has only 96 benchmark prompts and a "
+                "12-prompt test split; this probe may gate data scaling but "
+                "cannot support a paper claim."
+            )
         ),
         "input": str(args.input.resolve()),
         "runs": runs,
         "summaries": summaries,
         "probe_gate": {
             "minimum_delta": args.minimum_delta,
+            "minimum_base_delta": args.minimum_base_delta,
             "criterion": (
                 "mean(global_survival - global_map) >= minimum_delta and "
                 "the delta is positive for every seed"
+                + (
+                    "; also mean(global_survival - base) >= "
+                    "minimum_base_delta and positive for every seed"
+                    if args.minimum_base_delta is not None
+                    else ""
+                )
             ),
             "pass": probe_pass,
         },

@@ -73,6 +73,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--validation-split", default="validation")
     parser.add_argument("--test-split", default="test")
     parser.add_argument(
+        "--skip-test",
+        action="store_true",
+        help=(
+            "Do not load or evaluate a test split. Use this for development "
+            "selection before the reserved formal test is unsealed."
+        ),
+    )
+    parser.add_argument(
         "--evidence-tier",
         choices=["plumbing_smoke", "development", "formal"],
         default="development",
@@ -457,6 +465,8 @@ def evaluate(
 
 def main() -> None:
     args = parse_args()
+    if args.evidence_tier == "formal" and args.skip_test:
+        raise ValueError("formal evidence cannot skip its frozen test split")
     run_provenance = {
         "project_commit": git_revision(PROJECT),
         "project_dirty_at_start": git_is_dirty(PROJECT),
@@ -479,7 +489,11 @@ def main() -> None:
     validation_dataset = CanonicalBlockDataset(
         args.data, split=args.validation_split
     )
-    test_dataset = CanonicalBlockDataset(args.data, split=args.test_split)
+    test_dataset = (
+        None
+        if args.skip_test
+        else CanonicalBlockDataset(args.data, split=args.test_split)
+    )
     train_loader = make_loader(
         train_dataset,
         candidate_k=args.candidate_k,
@@ -492,11 +506,15 @@ def main() -> None:
         batch_size=args.batch_size,
         shuffle=False,
     )
-    test_loader = make_loader(
-        test_dataset,
-        candidate_k=args.candidate_k,
-        batch_size=args.batch_size,
-        shuffle=False,
+    test_loader = (
+        None
+        if test_dataset is None
+        else make_loader(
+            test_dataset,
+            candidate_k=args.candidate_k,
+            batch_size=args.batch_size,
+            shuffle=False,
+        )
     )
     embedding = load_target_embedding(args.target).to(
         device=device, dtype=torch.bfloat16
@@ -644,13 +662,17 @@ def main() -> None:
         device,
         args.normalization,
     )
-    final_test = evaluate(
-        head,
-        test_loader,
-        embedding,
-        device,
-        args.normalization,
-        include_examples=True,
+    final_test = (
+        None
+        if test_loader is None
+        else evaluate(
+            head,
+            test_loader,
+            embedding,
+            device,
+            args.normalization,
+            include_examples=True,
+        )
     )
 
     report = {
@@ -664,7 +686,12 @@ def main() -> None:
         "target": str(args.target.resolve()),
         "train_blocks": len(train_dataset),
         "validation_blocks": len(validation_dataset),
-        "test_blocks": len(test_dataset),
+        "test_blocks": len(test_dataset) if test_dataset is not None else 0,
+        "test_status": (
+            "skipped_reserved_unobserved"
+            if test_dataset is None
+            else "evaluated_once_after_selection"
+        ),
         "head_type": args.head_type,
         "normalization": args.normalization,
         "evidence_tier": args.evidence_tier,
