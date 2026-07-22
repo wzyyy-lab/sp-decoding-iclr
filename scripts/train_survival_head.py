@@ -98,6 +98,16 @@ def git_revision(path: Path) -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
+def git_is_dirty(path: Path) -> bool | None:
+    result = subprocess.run(
+        ["git", "-C", str(path), "status", "--porcelain"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return bool(result.stdout.strip()) if result.returncode == 0 else None
+
+
 def load_target_embedding(target: Path) -> torch.Tensor:
     index_path = target / "model.safetensors.index.json"
     index = json.loads(index_path.read_text())
@@ -301,6 +311,20 @@ def evaluate(
 
 def main() -> None:
     args = parse_args()
+    run_provenance = {
+        "project_commit": git_revision(PROJECT),
+        "project_dirty_at_start": git_is_dirty(PROJECT),
+        "data_metadata_sha256": sha256_file(args.data / "metadata.json"),
+        "target_config_sha256": sha256_file(args.target / "config.json"),
+        "trainer_sha256": sha256_file(Path(__file__)),
+        "head_source_sha256": sha256_file(
+            PROJECT / "src" / "sph" / "survival_path_head.py"
+        ),
+        "dflash_commit": git_revision(PROJECT / "third_party" / "dflash"),
+        "dflash_dirty_at_start": git_is_dirty(PROJECT / "third_party" / "dflash"),
+        "domino_commit": git_revision(PROJECT / "third_party" / "Domino"),
+        "domino_dirty_at_start": git_is_dirty(PROJECT / "third_party" / "Domino"),
+    }
     if not torch.cuda.is_available():
         raise RuntimeError("training requires CUDA")
     seed_everything(args.seed)
@@ -470,17 +494,7 @@ def main() -> None:
         "final_validation": final_validation,
         "final_test": final_test,
         "history": history,
-        "provenance": {
-            "project_commit": git_revision(PROJECT),
-            "data_metadata_sha256": sha256_file(args.data / "metadata.json"),
-            "target_config_sha256": sha256_file(args.target / "config.json"),
-            "trainer_sha256": sha256_file(Path(__file__)),
-            "head_source_sha256": sha256_file(
-                PROJECT / "src" / "sph" / "survival_path_head.py"
-            ),
-            "dflash_commit": git_revision(PROJECT / "third_party" / "dflash"),
-            "domino_commit": git_revision(PROJECT / "third_party" / "Domino"),
-        },
+        "provenance": run_provenance,
     }
     (args.output / "metrics.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2, default=str) + "\n",

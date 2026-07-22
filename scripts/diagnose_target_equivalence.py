@@ -69,6 +69,16 @@ def git_revision(path: Path) -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
+def git_is_dirty(path: Path) -> bool | None:
+    result = subprocess.run(
+        ["git", "-C", str(path), "status", "--porcelain"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return bool(result.stdout.strip()) if result.returncode == 0 else None
+
+
 def evenly_spaced_offsets(maximum: int, count: int) -> list[int]:
     if maximum < 0 or count < 1:
         return []
@@ -381,6 +391,19 @@ def evaluate_backend(
 
 def main() -> None:
     args = parse_args()
+    # Freeze provenance before any long-running work. Reading these values at
+    # report time would be racy if the shared checkout changed during a job.
+    run_provenance = {
+        "project_commit": git_revision(PROJECT),
+        "project_dirty_at_start": git_is_dirty(PROJECT),
+        "manifest_sha256": sha256_file(args.manifest),
+        "target_config_sha256": sha256_file(args.target / "config.json"),
+        "script_sha256": sha256_file(Path(__file__)),
+        "dflash_commit": git_revision(PROJECT / "third_party" / "dflash"),
+        "dflash_dirty_at_start": git_is_dirty(PROJECT / "third_party" / "dflash"),
+        "domino_commit": git_revision(PROJECT / "third_party" / "Domino"),
+        "domino_dirty_at_start": git_is_dirty(PROJECT / "third_party" / "Domino"),
+    }
     if not torch.cuda.is_available():
         raise RuntimeError("target equivalence diagnosis requires CUDA")
     if args.output.exists():
@@ -477,14 +500,7 @@ def main() -> None:
         "required_comparisons": required_comparisons,
         "missing_comparisons": missing_comparisons,
         "seconds": time.perf_counter() - start,
-        "provenance": {
-            "project_commit": git_revision(PROJECT),
-            "manifest_sha256": sha256_file(args.manifest),
-            "target_config_sha256": sha256_file(args.target / "config.json"),
-            "script_sha256": sha256_file(Path(__file__)),
-            "dflash_commit": git_revision(PROJECT / "third_party" / "dflash"),
-            "domino_commit": git_revision(PROJECT / "third_party" / "Domino"),
-        },
+        "provenance": run_provenance,
         "summary": summary,
         "events": all_events,
         "fixed_sequences": [

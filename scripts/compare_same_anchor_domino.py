@@ -72,6 +72,16 @@ def git_revision(path: Path) -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
+def git_is_dirty(path: Path) -> bool | None:
+    result = subprocess.run(
+        ["git", "-C", str(path), "status", "--porcelain"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return bool(result.stdout.strip()) if result.returncode == 0 else None
+
+
 def load_manifest(path: Path) -> list[dict[str, Any]]:
     with path.open(encoding="utf-8") as handle:
         records = [json.loads(line) for line in handle if line.strip()]
@@ -206,6 +216,20 @@ def paired_summary(
 
 def main() -> None:
     args = parse_args()
+    metadata_path = args.canonical / "metadata.json"
+    run_provenance = {
+        "project_commit": git_revision(PROJECT),
+        "project_dirty_at_start": git_is_dirty(PROJECT),
+        "manifest_sha256": sha256_file(args.manifest),
+        "canonical_metadata_sha256": sha256_file(metadata_path),
+        "target_config_sha256": sha256_file(args.target / "config.json"),
+        "domino_config_sha256": sha256_file(args.domino_draft / "config.json"),
+        "script_sha256": sha256_file(Path(__file__)),
+        "dflash_commit": git_revision(PROJECT / "third_party" / "dflash"),
+        "dflash_dirty_at_start": git_is_dirty(PROJECT / "third_party" / "dflash"),
+        "domino_commit": git_revision(PROJECT / "third_party" / "Domino"),
+        "domino_dirty_at_start": git_is_dirty(PROJECT / "third_party" / "Domino"),
+    }
     if not torch.cuda.is_available():
         raise RuntimeError("same-anchor Domino comparison requires CUDA")
     if args.output.exists():
@@ -474,7 +498,6 @@ def main() -> None:
         and domains_with_positive_primary_gain >= 2
     )
 
-    metadata_path = args.canonical / "metadata.json"
     report = {
         "evidence_tier": "gate1b_same_anchor",
         "status": "completed",
@@ -497,18 +520,7 @@ def main() -> None:
             "domino_draft": str(args.domino_draft.resolve()),
             "manifest": str(args.manifest.resolve()),
         },
-        "provenance": {
-            "project_commit": git_revision(PROJECT),
-            "manifest_sha256": sha256_file(args.manifest),
-            "canonical_metadata_sha256": sha256_file(metadata_path),
-            "target_config_sha256": sha256_file(args.target / "config.json"),
-            "domino_config_sha256": sha256_file(
-                args.domino_draft / "config.json"
-            ),
-            "script_sha256": sha256_file(Path(__file__)),
-            "dflash_commit": git_revision(PROJECT / "third_party" / "dflash"),
-            "domino_commit": git_revision(PROJECT / "third_party" / "Domino"),
-        },
+        "provenance": run_provenance,
         "metric_convention": {
             "primary": "accepted draft tokens over the shared first 15 positions",
             "verification_advance": "accepted draft tokens + 1",
