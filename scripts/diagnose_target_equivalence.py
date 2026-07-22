@@ -421,12 +421,30 @@ def main() -> None:
             reference_full = full
 
     summary = aggregate(all_events)
+    required_comparisons = []
+    for backend_index, backend in enumerate(args.backends):
+        required_comparisons.extend(
+            [
+                f"{backend}:cached_single_vs_full_prefix",
+                f"{backend}:cached_same_shape_replay",
+                f"{backend}:cached_block_vs_full_prefix",
+            ]
+        )
+        if backend_index > 0:
+            required_comparisons.append(
+                f"{args.reference_backend}_vs_{backend}:full_prefix"
+            )
+    missing_comparisons = [
+        key
+        for key in required_comparisons
+        if key not in summary or summary[key]["predictions"] == 0
+    ]
     gate_comparisons = [
         key
         for key in summary
         if "cached_same_shape_replay" not in key
     ]
-    gate_pass = all(
+    gate_pass = not missing_comparisons and all(
         summary[key]["unexplained_disagreements"] == 0
         for key in gate_comparisons
     ) and all(
@@ -456,6 +474,8 @@ def main() -> None:
         ),
         "error_atol": args.error_atol,
         "gate_pass": gate_pass,
+        "required_comparisons": required_comparisons,
+        "missing_comparisons": missing_comparisons,
         "seconds": time.perf_counter() - start,
         "provenance": {
             "project_commit": git_revision(PROJECT),
