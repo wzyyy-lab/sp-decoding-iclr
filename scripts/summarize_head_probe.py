@@ -19,7 +19,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--minimum-delta", type=float, default=0.2)
     parser.add_argument(
         "--evaluation-split",
-        choices=["test", "validation"],
+        choices=["test", "validation", "gate"],
         default="test",
     )
     parser.add_argument(
@@ -59,11 +59,11 @@ def main() -> None:
     if not metrics_paths:
         raise FileNotFoundError(f"no */metrics.json files below {args.input}")
     runs = []
-    report_key = (
-        "final_test"
-        if args.evaluation_split == "test"
-        else "final_validation"
-    )
+    report_key = {
+        "test": "final_test",
+        "validation": "final_validation",
+        "gate": "final_gate",
+    }[args.evaluation_split]
     for path in metrics_paths:
         report = json.loads(path.read_text())
         if report.get("evidence_tier") != "development":
@@ -220,7 +220,7 @@ def main() -> None:
             "This is validation-selected development evidence. It may gate "
             "data/model scaling but cannot support a paper claim or unseal "
             "the reserved formal test."
-            if args.evaluation_split == "validation"
+            if args.evaluation_split in {"validation", "gate"}
             else (
                 "The source collection has only 96 benchmark prompts and a "
                 "12-prompt test split; this probe may gate data scaling but "

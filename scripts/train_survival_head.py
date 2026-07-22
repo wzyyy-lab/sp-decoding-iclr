@@ -71,6 +71,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--train-split", default="train")
     parser.add_argument("--validation-split", default="validation")
+    parser.add_argument(
+        "--gate-split",
+        help=(
+            "Optional held-out development gate evaluated exactly once after "
+            "validation-only checkpoint selection."
+        ),
+    )
     parser.add_argument("--test-split", default="test")
     parser.add_argument(
         "--skip-test",
@@ -467,6 +474,8 @@ def main() -> None:
     args = parse_args()
     if args.evidence_tier == "formal" and args.skip_test:
         raise ValueError("formal evidence cannot skip its frozen test split")
+    if args.gate_split is not None and args.gate_split == args.validation_split:
+        raise ValueError("gate split must differ from checkpoint-selection split")
     run_provenance = {
         "project_commit": git_revision(PROJECT),
         "project_dirty_at_start": git_is_dirty(PROJECT),
@@ -489,6 +498,11 @@ def main() -> None:
     validation_dataset = CanonicalBlockDataset(
         args.data, split=args.validation_split
     )
+    gate_dataset = (
+        None
+        if args.gate_split is None
+        else CanonicalBlockDataset(args.data, split=args.gate_split)
+    )
     test_dataset = (
         None
         if args.skip_test
@@ -505,6 +519,16 @@ def main() -> None:
         candidate_k=args.candidate_k,
         batch_size=args.batch_size,
         shuffle=False,
+    )
+    gate_loader = (
+        None
+        if gate_dataset is None
+        else make_loader(
+            gate_dataset,
+            candidate_k=args.candidate_k,
+            batch_size=args.batch_size,
+            shuffle=False,
+        )
     )
     test_loader = (
         None
@@ -648,6 +672,18 @@ def main() -> None:
         args.normalization,
         include_examples=True,
     )
+    final_gate = (
+        None
+        if gate_loader is None
+        else evaluate(
+            head,
+            gate_loader,
+            embedding,
+            device,
+            args.normalization,
+            include_examples=True,
+        )
+    )
     # This is a post-selection diagnostic only. It is never used for checkpoint
     # selection, but makes underfitting distinguishable from memorization.
     final_train = evaluate(
@@ -686,6 +722,12 @@ def main() -> None:
         "target": str(args.target.resolve()),
         "train_blocks": len(train_dataset),
         "validation_blocks": len(validation_dataset),
+        "gate_blocks": len(gate_dataset) if gate_dataset is not None else 0,
+        "gate_status": (
+            "not_configured"
+            if gate_dataset is None
+            else "evaluated_once_after_selection"
+        ),
         "test_blocks": len(test_dataset) if test_dataset is not None else 0,
         "test_status": (
             "skipped_reserved_unobserved"
@@ -702,6 +744,7 @@ def main() -> None:
         "selected_epoch": int(best_checkpoint["epoch"]),
         "final_train_diagnostic": final_train,
         "final_validation": final_validation,
+        "final_gate": final_gate,
         "final_test": final_test,
         "history": history,
         "provenance": run_provenance,

@@ -30,7 +30,7 @@ nvidia-smi
 "$PYTHON" scripts/collect_canonical_blocks.py \
   --target "$ASSETS/models/Qwen3-4B" \
   --draft "$ASSETS/models/Qwen3-4B-DFlash-b16" \
-  --manifest "$PROJECT/artifacts/manifests/phase3_development_v2.jsonl" \
+  --manifest "$PROJECT/artifacts/manifests/phase3_development_v3.jsonl" \
   --block-size 16 \
   --top-k 64 \
   --anchors-per-sample 8 \

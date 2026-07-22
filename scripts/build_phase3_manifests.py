@@ -47,7 +47,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--math-train", type=int, default=667)
     parser.add_argument("--code-train", type=int, default=667)
     parser.add_argument("--chat-train", type=int, default=666)
-    parser.add_argument("--validation-per-domain", type=int, default=100)
+    parser.add_argument("--validation-select-per-domain", type=int, default=50)
+    parser.add_argument("--validation-gate-per-domain", type=int, default=50)
     parser.add_argument("--test-per-domain", type=int, default=200)
     parser.add_argument("--seed", type=int, default=20260722)
     parser.add_argument("--overlap-ngram-size", type=int, default=8)
@@ -203,7 +204,7 @@ def make_record(
         raise ValueError(f"empty prompt from {source}")
     identity = str(raw_id) if raw_id is not None else exact_prompt_hash(prompt)[:20]
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "sample_id": f"{source}:{identity}",
         "domain": domain,
         "source": source,
@@ -435,7 +436,8 @@ def main() -> None:
         args.math_train,
         args.code_train,
         args.chat_train,
-        args.validation_per_domain,
+        args.validation_select_per_domain,
+        args.validation_gate_per_domain,
         args.test_per_domain,
         args.overlap_ngram_size,
     ) < 1:
@@ -584,21 +586,31 @@ def main() -> None:
                 args.seed, f"development/{domain}", item
             ),
         )
-        needed = args.validation_per_domain + requested_train[domain]
+        needed = (
+            args.validation_gate_per_domain
+            + args.validation_select_per_domain
+            + requested_train[domain]
+        )
         if len(ordered) < needed:
             raise ValueError(
                 f"{domain} needs {needed} development prompts but only "
                 f"{len(ordered)} remain"
             )
-        # Validation is reserved first so future larger training tiers remain
-        # nested without changing the validation set.
-        validation = ordered[: args.validation_per_domain]
+        # The gate is reserved before the selection split, and both are
+        # reserved before training. Future larger training tiers therefore
+        # remain nested without changing either held-out development set.
+        validation_gate = ordered[: args.validation_gate_per_domain]
+        select_start = args.validation_gate_per_domain
+        validation_select = ordered[
+            select_start : select_start + args.validation_select_per_domain
+        ]
+        train_start = select_start + args.validation_select_per_domain
         training = ordered[
-            args.validation_per_domain : args.validation_per_domain
-            + requested_train[domain]
+            train_start : train_start + requested_train[domain]
         ]
         development.extend(assign_split(training, "train"))
-        development.extend(assign_split(validation, "validation"))
+        development.extend(assign_split(validation_select, "validation_select"))
+        development.extend(assign_split(validation_gate, "validation_gate"))
 
     development = sorted(
         development,
@@ -627,13 +639,14 @@ def main() -> None:
     write_jsonl_atomic(args.development_output, development)
     write_jsonl_atomic(args.reserved_test_output, reserved_test)
     metadata = {
-        "schema_version": 2,
+        "schema_version": 3,
         "evidence_tier": "protocol_manifest",
         "formal_test_status": "reserved_unobserved",
         "selection_policy": {
             "seed": args.seed,
             "development_train_counts": requested_train,
-            "validation_per_domain": args.validation_per_domain,
+            "validation_select_per_domain": args.validation_select_per_domain,
+            "validation_gate_per_domain": args.validation_gate_per_domain,
             "test_per_domain": args.test_per_domain,
             "training_sources": {
                 "math": "GSM8K train",
@@ -649,7 +662,8 @@ def main() -> None:
                 ),
             },
             "split_unit": "prompt; all future anchors inherit the prompt split",
-            "validation_reserved_before_training": True,
+            "validation_gate_never_used_for_checkpoint_selection": True,
+            "validation_gate_reserved_before_selection_and_training": True,
             "learning_curve_training_prefix_is_nested": True,
             "overlap_ngram_size": args.overlap_ngram_size,
             "overlap_jaccard_rejection_threshold": args.overlap_threshold,
