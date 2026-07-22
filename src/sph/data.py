@@ -82,3 +82,55 @@ def collate_canonical_blocks(
         "gold_in_lattice": gold_in_lattice,
         "gold_candidate_indices": gold_candidate_indices,
     }
+
+
+def validate_stored_canonical_contexts(
+    records: list[dict[str, Any]], sample_id: str
+) -> Tensor:
+    """Validate prefix nesting and return the longest exact stored context.
+
+    A canonical sample's later anchors must extend every earlier anchor.  This
+    check catches corrupt or accidentally mixed shards before a same-anchor
+    comparison feeds their contexts to a model.
+    """
+
+    if not records:
+        raise ValueError(f"no canonical records for {sample_id}")
+    if any("context_ids_before_anchor" not in record for record in records):
+        raise ValueError(f"stored context is missing for {sample_id}")
+    longest_record = max(
+        records,
+        key=lambda item: int(item["context_ids_before_anchor"].numel()),
+    )
+    longest_context_ids = longest_record["context_ids_before_anchor"].long()
+    for record in records:
+        context_ids = record["context_ids_before_anchor"].long()
+        context_length = int(context_ids.numel())
+        if int(record.get("context_length", context_length)) != context_length:
+            raise RuntimeError(f"stored context length mismatch for {sample_id}")
+        if not torch.equal(context_ids, longest_context_ids[:context_length]):
+            raise RuntimeError(
+                f"stored contexts are not prefix-nested for {sample_id}"
+            )
+        if context_length >= int(longest_context_ids.numel()):
+            continue
+        if int(longest_context_ids[context_length]) != int(
+            record["anchor_token_id"]
+        ):
+            raise RuntimeError(
+                f"stored anchor is inconsistent with longer context for {sample_id}"
+            )
+        available_gold = min(
+            int(record["gold_ids"].numel()),
+            int(longest_context_ids.numel()) - context_length - 1,
+        )
+        if not torch.equal(
+            record["gold_ids"][:available_gold].long(),
+            longest_context_ids[
+                context_length + 1 : context_length + 1 + available_gold
+            ],
+        ):
+            raise RuntimeError(
+                f"stored gold is inconsistent with longer context for {sample_id}"
+            )
+    return longest_context_ids

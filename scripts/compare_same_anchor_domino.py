@@ -28,6 +28,7 @@ from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
 from collect_canonical_blocks import extract_context_feature, package_version
 from collect_domino_canonical import correction_logits
 from sph.candidate_ceiling import accepted_draft_prefix_lengths
+from sph.data import validate_stored_canonical_contexts
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -94,8 +95,24 @@ def load_manifest(path: Path) -> list[dict[str, Any]]:
 def load_canonical(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     metadata_path = path / "metadata.json"
     metadata = json.loads(metadata_path.read_text())
+    if metadata.get("collection_complete") is False:
+        raise RuntimeError(f"canonical collection is incomplete: {path}")
+    shard_paths = sorted(path.glob("shard-*.pt"))
+    expected_shards = metadata.get("shards")
+    if expected_shards is not None:
+        expected_names = [entry["path"] for entry in expected_shards]
+        actual_names = [shard.name for shard in shard_paths]
+        if actual_names != expected_names:
+            raise RuntimeError("canonical shard manifest does not match the directory")
+        for shard, expected in zip(
+            shard_paths, expected_shards, strict=True
+        ):
+            if shard.stat().st_size != int(expected["bytes"]):
+                raise RuntimeError(f"canonical shard size mismatch: {shard}")
+            if sha256_file(shard) != expected["sha256"]:
+                raise RuntimeError(f"canonical shard hash mismatch: {shard}")
     records: list[dict[str, Any]] = []
-    for shard in sorted(path.glob("shard-*.pt")):
+    for shard in shard_paths:
         records.extend(torch.load(shard, map_location="cpu", weights_only=False))
     if not records:
         raise FileNotFoundError(f"no canonical records found under {path}")
@@ -264,6 +281,12 @@ def main() -> None:
     missing = selected_ids - grouped_canonical.keys()
     if missing:
         raise ValueError(f"canonical collection is missing samples: {sorted(missing)}")
+    stored_context_flags = {
+        "context_ids_before_anchor" in record for record in canonical_records
+    }
+    if len(stored_context_flags) != 1:
+        raise RuntimeError("canonical collection mixes stored and regenerated contexts")
+    use_stored_context = stored_context_flags == {True}
 
     tokenizer = AutoTokenizer.from_pretrained(
         str(args.target), local_files_only=True
@@ -296,31 +319,48 @@ def main() -> None:
             grouped_canonical[sample["sample_id"]],
             key=lambda item: int(item["anchor_offset"]),
         )
-        text = tokenizer.apply_chat_template(
-            [{"role": "user", "content": sample["prompt"]}],
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=False,
-        )
-        encoded = tokenizer(text, return_tensors="pt").to(target.device)
-        prompt_tokens = int(encoded.input_ids.shape[1])
-        if any(int(record["prompt_token_count"]) != prompt_tokens for record in records):
-            raise RuntimeError(f"prompt tokenization drift for {sample['sample_id']}")
-        sequence = target.generate(
-            encoded.input_ids,
-            attention_mask=encoded.attention_mask,
-            max_new_tokens=int(canonical_metadata["continuation_tokens"]) + 1,
-            do_sample=False,
-            use_cache=True,
-            pad_token_id=tokenizer.eos_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-        )
-        continuation = sequence[0, prompt_tokens:]
-        longest_context = prompt_tokens + max(
-            int(record["anchor_offset"]) for record in records
-        )
+        if use_stored_context:
+            longest_context_ids = validate_stored_canonical_contexts(
+                records, sample["sample_id"]
+            )
+            sequence_for_features = longest_context_ids.unsqueeze(0).to(
+                target.device
+            )
+            longest_context = int(longest_context_ids.numel())
+            continuation = None
+            prompt_tokens = None
+        else:
+            text = tokenizer.apply_chat_template(
+                [{"role": "user", "content": sample["prompt"]}],
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
+            )
+            encoded = tokenizer(text, return_tensors="pt").to(target.device)
+            prompt_tokens = int(encoded.input_ids.shape[1])
+            if any(
+                int(record["prompt_token_count"]) != prompt_tokens
+                for record in records
+            ):
+                raise RuntimeError(
+                    f"prompt tokenization drift for {sample['sample_id']}"
+                )
+            sequence = target.generate(
+                encoded.input_ids,
+                attention_mask=encoded.attention_mask,
+                max_new_tokens=int(canonical_metadata["continuation_tokens"]) + 1,
+                do_sample=False,
+                use_cache=True,
+                pad_token_id=tokenizer.eos_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+            )
+            continuation = sequence[0, prompt_tokens:]
+            longest_context = prompt_tokens + max(
+                int(record["anchor_offset"]) for record in records
+            )
+            sequence_for_features = sequence[:, :longest_context]
         target_outputs = target.model(
-            sequence[:, :longest_context],
+            sequence_for_features,
             use_cache=False,
             output_hidden_states=True,
             return_dict=True,
@@ -332,21 +372,29 @@ def main() -> None:
 
         for record in records:
             offset = int(record["anchor_offset"])
-            anchor = continuation[offset].to(torch.long)
             stored_anchor = int(record["anchor_token_id"])
             stored_gold = record["gold_ids"].long().to(target.device)
-            reconstructed_gold = continuation[
-                offset + 1 : offset + 1 + saved_horizon
-            ].long()
-            if int(anchor) != stored_anchor or not torch.equal(
-                reconstructed_gold, stored_gold
-            ):
-                raise RuntimeError(
-                    f"canonical reconstruction mismatch for {sample['sample_id']} "
-                    f"at offset {offset}"
+            if use_stored_context:
+                anchor = torch.tensor(
+                    stored_anchor, dtype=torch.long, device=target.device
                 )
-
-            context_length = prompt_tokens + offset
+                context_length = int(
+                    record["context_ids_before_anchor"].numel()
+                )
+            else:
+                assert continuation is not None and prompt_tokens is not None
+                anchor = continuation[offset].to(torch.long)
+                reconstructed_gold = continuation[
+                    offset + 1 : offset + 1 + saved_horizon
+                ].long()
+                if int(anchor) != stored_anchor or not torch.equal(
+                    reconstructed_gold, stored_gold
+                ):
+                    raise RuntimeError(
+                        f"canonical reconstruction mismatch for "
+                        f"{sample['sample_id']} at offset {offset}"
+                    )
+                context_length = prompt_tokens + offset
             block_size = int(domino.block_size)
             block_ids = torch.full(
                 (1, block_size),
@@ -528,8 +576,15 @@ def main() -> None:
             "primary": "accepted draft tokens over the shared first 15 positions",
             "verification_advance": "accepted draft tokens + 1",
             "bootstrap_unit": "prompt/sample_id; all anchors resampled together",
-            "canonical_reconstruction": "hard failure on stored anchor/gold mismatch",
+            "canonical_reconstruction": (
+                "exact stored context replay with shard integrity verification"
+                if use_stored_context
+                else "legacy regeneration with hard failure on anchor/gold mismatch"
+            ),
         },
+        "context_replay_mode": (
+            "stored_exact_context" if use_stored_context else "legacy_regeneration"
+        ),
         "overall": overall,
         "by_domain": by_domain,
         "paired_comparisons": paired,

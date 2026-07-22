@@ -4,17 +4,23 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.metadata
 import json
 import math
 import os
 import platform
+import subprocess
 import time
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 import torch
 from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
+
+
+PROJECT = Path(__file__).resolve().parents[1]
 
 
 def parse_args() -> argparse.Namespace:
@@ -75,9 +81,14 @@ class ShardWriter:
         self.records: list[dict[str, Any]] = []
         self.shard_index = 0
         self.total_blocks = 0
+        self.sample_ids: set[str] = set()
+        self.counts: dict[str, int] = defaultdict(int)
+        self.shards: list[dict[str, Any]] = []
 
     def add(self, record: dict[str, Any]) -> None:
         self.records.append(record)
+        self.sample_ids.add(record["sample_id"])
+        self.counts[f"{record['domain']}/{record['split']}"] += 1
         if len(self.records) >= self.blocks_per_shard:
             self.flush()
 
@@ -89,6 +100,14 @@ class ShardWriter:
         torch.save(self.records, temporary)
         os.replace(temporary, path)
         print(f"wrote {path} ({len(self.records)} blocks)", flush=True)
+        self.shards.append(
+            {
+                "path": path.name,
+                "blocks": len(self.records),
+                "bytes": path.stat().st_size,
+                "sha256": sha256_file(path),
+            }
+        )
         self.total_blocks += len(self.records)
         self.records = []
         self.shard_index += 1
@@ -101,14 +120,66 @@ def package_version(name: str) -> str | None:
         return None
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def git_revision(path: Path) -> str | None:
+    result = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "HEAD"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def git_is_dirty(path: Path) -> bool | None:
+    result = subprocess.run(
+        ["git", "-C", str(path), "status", "--porcelain"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return bool(result.stdout.strip()) if result.returncode == 0 else None
+
+
+def checkpoint_fingerprint(root: Path) -> list[dict[str, Any]]:
+    """Hash every top-level checkpoint file, including weights and remote code."""
+
+    files = sorted(path for path in root.iterdir() if path.is_file())
+    if not files:
+        raise FileNotFoundError(f"checkpoint directory is empty: {root}")
+    return [
+        {
+            "path": path.name,
+            "bytes": path.stat().st_size,
+            "sha256": sha256_file(path),
+        }
+        for path in files
+    ]
+
+
+def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
+
+
 def validate_output_directory(output: Path) -> None:
-    output.mkdir(parents=True, exist_ok=True)
-    conflicts = list(output.glob("shard-*.pt"))
-    if conflicts or (output / "metadata.json").exists():
+    if output.exists() and any(output.iterdir()):
         raise FileExistsError(
             f"refusing to mix with an existing collection in {output}; "
             "choose a new output directory"
         )
+    output.mkdir(parents=True, exist_ok=True)
 
 
 @torch.inference_mode()
@@ -218,6 +289,13 @@ def collect_sample(
                 "split": sample["split"],
                 "prompt_token_count": prompt_tokens,
                 "anchor_offset": anchor_offset,
+                "context_length": context_length,
+                # Exact token IDs strictly before the anchor.  Storing these
+                # makes same-anchor replay independent of generation-kernel
+                # tie behavior on another GPU or attention backend.
+                "context_ids_before_anchor": sequence[
+                    0, :context_length
+                ].cpu().to(torch.int32),
                 "anchor_token_id": int(anchor_token_id.item()),
                 "gold_ids": gold_ids.cpu().to(torch.int32),
                 "parallel_hidden": parallel_hidden[0].cpu().to(torch.bfloat16),
@@ -243,6 +321,46 @@ def main() -> None:
         raise ValueError("top_k must be positive")
     samples = read_manifest(args.manifest, args.max_samples)
     validate_output_directory(args.output)
+    run_provenance = {
+        "project_commit": git_revision(PROJECT),
+        "project_dirty_at_start": git_is_dirty(PROJECT),
+        "collector_sha256": sha256_file(Path(__file__)),
+        "manifest_sha256": sha256_file(args.manifest),
+        "target_files": checkpoint_fingerprint(args.target),
+        "draft_files": checkpoint_fingerprint(args.draft),
+        "dflash_commit": git_revision(PROJECT / "third_party" / "dflash"),
+        "dflash_dirty_at_start": git_is_dirty(
+            PROJECT / "third_party" / "dflash"
+        ),
+        "domino_commit": git_revision(PROJECT / "third_party" / "Domino"),
+        "domino_dirty_at_start": git_is_dirty(
+            PROJECT / "third_party" / "Domino"
+        ),
+    }
+    metadata = {
+        "format_version": 2,
+        "collection_complete": False,
+        "created_unix": time.time(),
+        "job_id": os.environ.get("SLURM_JOB_ID"),
+        "hostname": platform.node(),
+        "python": platform.python_version(),
+        "torch": torch.__version__,
+        "transformers": package_version("transformers"),
+        "target": str(args.target.resolve()),
+        "draft": str(args.draft.resolve()),
+        "manifest": str(args.manifest.resolve()),
+        "block_size": args.block_size,
+        "draft_positions": args.block_size - 1,
+        "top_k": args.top_k,
+        "anchors_per_sample": args.anchors_per_sample,
+        "continuation_tokens": args.continuation_tokens,
+        "attention_implementation": args.attn_implementation,
+        "dtype": "bfloat16",
+        "num_manifest_samples": len(samples),
+        "provenance": run_provenance,
+    }
+    incomplete_path = args.output / "INCOMPLETE.json"
+    atomic_write_json(incomplete_path, metadata)
     torch.cuda.set_device(0)
 
     load_start = time.perf_counter()
@@ -273,32 +391,14 @@ def main() -> None:
     if getattr(draft.config, "dflash_config", {}).get("projector_type") is not None:
         raise ValueError("Gate 1 must use the pure DFlash checkpoint, not Domino")
 
-    metadata = {
-        "format_version": 1,
-        "created_unix": time.time(),
-        "job_id": os.environ.get("SLURM_JOB_ID"),
-        "hostname": platform.node(),
-        "device": torch.cuda.get_device_name(0),
-        "python": platform.python_version(),
-        "torch": torch.__version__,
-        "transformers": package_version("transformers"),
-        "target": str(args.target.resolve()),
-        "draft": str(args.draft.resolve()),
-        "manifest": str(args.manifest.resolve()),
-        "block_size": args.block_size,
-        "draft_positions": args.block_size - 1,
-        "top_k": args.top_k,
-        "anchors_per_sample": args.anchors_per_sample,
-        "continuation_tokens": args.continuation_tokens,
-        "attention_implementation": args.attn_implementation,
-        "dtype": "bfloat16",
-        "load_seconds": load_seconds,
-        "num_manifest_samples": len(samples),
-        "target_layer_ids": list(draft.target_layer_ids),
-    }
-    (args.output / "metadata.json").write_text(
-        json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
+    metadata.update(
+        {
+            "device": torch.cuda.get_device_name(0),
+            "load_seconds": load_seconds,
+            "target_layer_ids": list(draft.target_layer_ids),
+        }
     )
+    atomic_write_json(incomplete_path, metadata)
 
     writer = ShardWriter(args.output, args.shard_blocks)
     collection_start = time.perf_counter()
@@ -323,11 +423,14 @@ def main() -> None:
         )
     writer.flush()
     metadata["num_blocks"] = writer.total_blocks
+    metadata["num_collected_samples"] = len(writer.sample_ids)
+    metadata["block_counts_by_domain_split"] = dict(sorted(writer.counts.items()))
+    metadata["shards"] = writer.shards
     metadata["collection_seconds"] = time.perf_counter() - collection_start
     metadata["peak_memory_gib"] = torch.cuda.max_memory_allocated() / 2**30
-    temporary = args.output / f"metadata.json.{os.getpid()}.tmp"
-    temporary.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
-    os.replace(temporary, args.output / "metadata.json")
+    metadata["collection_complete"] = True
+    atomic_write_json(args.output / "metadata.json", metadata)
+    incomplete_path.unlink()
     print(json.dumps(metadata, indent=2), flush=True)
 
 
