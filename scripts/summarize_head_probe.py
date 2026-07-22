@@ -97,6 +97,30 @@ def main() -> None:
                     for run in group
                 ]
             )
+        disagreement_metrics = {}
+        for pair_name in group[0]["test"].get("decoder_disagreement", {}):
+            disagreement_metrics[pair_name] = {
+                "path_disagreement_fraction": metric_summary(
+                    [
+                        float(
+                            run["test"]["decoder_disagreement"][pair_name][
+                                "path_disagreement_fraction"
+                            ]
+                        )
+                        for run in group
+                    ]
+                ),
+                "first_token_disagreement_fraction": metric_summary(
+                    [
+                        float(
+                            run["test"]["decoder_disagreement"][pair_name][
+                                "first_token_disagreement_fraction"
+                            ]
+                        )
+                        for run in group
+                    ]
+                ),
+            }
         global_vs_map = [
             float(run["test"]["global_survival"]["mean_accepted_draft_tokens"])
             - float(run["test"]["global_map"]["mean_accepted_draft_tokens"])
@@ -116,6 +140,7 @@ def main() -> None:
             "seeds": [run["seed"] for run in group],
             "selected_epochs": [run["selected_epoch"] for run in group],
             "test_eal": decoder_metrics,
+            "decoder_disagreement": disagreement_metrics,
             "deltas": {
                 "global_survival_minus_global_map": metric_summary(global_vs_map),
                 "global_survival_minus_local_survival": metric_summary(

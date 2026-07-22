@@ -398,6 +398,65 @@ def prefix_censored_nll(
     return nll
 
 
+def gold_prefix_survival_utility(
+    log_probs: Tensor,
+    gold_candidate_indices: Tensor,
+    gold_in_lattice: Tensor,
+) -> Tensor:
+    """Predicted expected accepted length of the observed gold prefix.
+
+    The contribution at position ``i`` is the predicted probability that every
+    gold candidate through ``i`` is correct.  Once gold enters OTHER, later
+    positions are unreachable and contribute zero.  This is the differentiable
+    training counterpart of longest-prefix utility, not a replacement for the
+    censored likelihood.
+    """
+
+    if log_probs.ndim != 4:
+        raise ValueError("log_probs must have shape [B, L, K, K]")
+    batch, length, candidates, next_candidates = log_probs.shape
+    if candidates != next_candidates:
+        raise ValueError("candidate dimensions must match")
+    if gold_candidate_indices.shape != (batch, length):
+        raise ValueError("gold_candidate_indices must have shape [B, L]")
+    if gold_in_lattice.shape != (batch, length):
+        raise ValueError("gold_in_lattice must have shape [B, L]")
+
+    batch_index = torch.arange(batch, device=log_probs.device)
+    previous = torch.zeros(batch, dtype=torch.long, device=log_probs.device)
+    alive = torch.ones(batch, dtype=torch.bool, device=log_probs.device)
+    log_survival = torch.zeros(
+        batch, dtype=log_probs.dtype, device=log_probs.device
+    )
+    utility = torch.zeros_like(log_survival)
+    for position in range(length):
+        current = gold_candidate_indices[:, position].clamp(0, candidates - 1)
+        selected_log_prob = log_probs[
+            batch_index, position, previous, current
+        ]
+        alive = alive & gold_in_lattice[:, position]
+        log_survival = log_survival + torch.where(
+            alive, selected_log_prob, torch.zeros_like(selected_log_prob)
+        )
+        utility = utility + torch.where(
+            alive, torch.exp(log_survival), torch.zeros_like(log_survival)
+        )
+        previous = torch.where(alive, current, previous)
+    return utility
+
+
+def gold_prefix_survival_loss(
+    log_probs: Tensor,
+    gold_candidate_indices: Tensor,
+    gold_in_lattice: Tensor,
+) -> Tensor:
+    """Negative gold-prefix utility, returned per example."""
+
+    return -gold_prefix_survival_utility(
+        log_probs, gold_candidate_indices, gold_in_lattice
+    )
+
+
 def absorbing_prefix_crf_conditionals(
     edge_scores: Tensor,
     outside_log_mass: Tensor,

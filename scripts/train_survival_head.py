@@ -25,6 +25,7 @@ from sph.survival_path_head import (
     BidirectionalSurvivalPathHead,
     SurvivalPathHead,
     absorbing_prefix_crf_conditionals,
+    gold_prefix_survival_loss,
     greedy_markov_decode,
     prefix_censored_nll,
     survival_decode,
@@ -61,6 +62,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--base-regularization", type=float, default=0.01)
+    parser.add_argument(
+        "--survival-loss-weight",
+        type=float,
+        default=0.1,
+        help="Weight on negative predicted utility of the observed gold prefix.",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--train-split", default="train")
     parser.add_argument("--validation-split", default="validation")
@@ -176,6 +183,20 @@ def evaluate(
     local_losses = []
     global_losses = []
     example_records: list[dict[str, Any]] = []
+    decoder_pairs = [
+        ("global_survival", "global_map"),
+        ("global_survival", "local_survival"),
+        ("local_survival", "local"),
+    ]
+    disagreement_stats = {
+        f"{left}_vs_{right}": {
+            "examples": 0,
+            "path_disagreements": 0,
+            "first_token_disagreements": 0,
+            "realized_delta_on_path_disagreements": 0.0,
+        }
+        for left, right in decoder_pairs
+    }
     for batch in loader:
         batch = to_device(batch, device)
         anchor_embedding = embedding[batch["anchor_ids"]]
@@ -242,23 +263,41 @@ def evaluate(
                 global_distribution.log_conditionals
             ).predicted_utility.float().cpu()
         )
+        for left, right in decoder_pairs:
+            path_diff = (paths[left] != paths[right]).any(dim=1)
+            first_diff = paths[left][:, 0] != paths[right][:, 0]
+            key = f"{left}_vs_{right}"
+            stats = disagreement_stats[key]
+            stats["examples"] += int(path_diff.numel())
+            stats["path_disagreements"] += int(path_diff.sum().item())
+            stats["first_token_disagreements"] += int(first_diff.sum().item())
+            realized_delta = (
+                realized_by_method[left] - realized_by_method[right]
+            ).float()
+            stats["realized_delta_on_path_disagreements"] += float(
+                realized_delta[path_diff].sum().item()
+            )
         for item_index, (sample_id, domain) in enumerate(
             zip(batch["sample_ids"], batch["domains"], strict=True)
         ):
-            example_records.append(
-                {
-                    "sample_id": sample_id,
-                    "domain": domain,
-                    "accepted_draft_tokens": {
-                        name: int(values[item_index].item())
-                        for name, values in realized_by_method.items()
-                    },
-                    "first_token_correct": {
-                        name: bool(values[item_index].item())
-                        for name, values in first_by_method.items()
-                    },
+            example_record = {
+                "sample_id": sample_id,
+                "domain": domain,
+                "accepted_draft_tokens": {
+                    name: int(values[item_index].item())
+                    for name, values in realized_by_method.items()
+                },
+                "first_token_correct": {
+                    name: bool(values[item_index].item())
+                    for name, values in first_by_method.items()
+                },
+            }
+            if include_examples:
+                example_record["candidate_path_indices"] = {
+                    name: path[item_index].detach().cpu().tolist()
+                    for name, path in paths.items()
                 }
-            )
+            example_records.append(example_record)
 
     report: dict[str, Any] = {
         "normalization": normalization,
@@ -292,6 +331,24 @@ def evaluate(
     report["predicted_global_survival_utility"] = float(
         torch.cat(accumulators["predicted_global_survival_utility"]).mean()
     )
+    report["decoder_disagreement"] = {}
+    for key, stats in disagreement_stats.items():
+        examples = stats["examples"]
+        path_disagreements = stats["path_disagreements"]
+        report["decoder_disagreement"][key] = {
+            **stats,
+            "path_disagreement_fraction": path_disagreements / examples,
+            "first_token_disagreement_fraction": stats[
+                "first_token_disagreements"
+            ]
+            / examples,
+            "mean_realized_delta_when_path_diff": (
+                stats["realized_delta_on_path_disagreements"]
+                / path_disagreements
+                if path_disagreements
+                else None
+            ),
+        }
     report["by_domain"] = {}
     for domain in sorted({record["domain"] for record in example_records}):
         subset = [record for record in example_records if record["domain"] == domain]
@@ -379,6 +436,9 @@ def main() -> None:
     for epoch in range(1, args.epochs + 1):
         head.train()
         train_losses = []
+        train_nlls = []
+        train_survival_losses = []
+        train_regularizations = []
         for batch in train_loader:
             batch = to_device(batch, device)
             optimizer.zero_grad(set_to_none=True)
@@ -404,6 +464,7 @@ def main() -> None:
                         batch["gold_candidate_indices"],
                         batch["gold_in_lattice"],
                     ).mean()
+                    training_log_probs = distribution.log_conditionals
                 else:
                     censored_nll = prefix_censored_nll(
                         output.log_probs,
@@ -411,12 +472,25 @@ def main() -> None:
                         batch["gold_candidate_indices"],
                         batch["gold_in_lattice"],
                     ).mean()
+                    training_log_probs = output.log_probs
+                survival_loss = gold_prefix_survival_loss(
+                    training_log_probs,
+                    batch["gold_candidate_indices"],
+                    batch["gold_in_lattice"],
+                ).mean()
                 regularization = output.residual_logits.square().mean()
-                loss = censored_nll + args.base_regularization * regularization
+                loss = (
+                    censored_nll
+                    + args.survival_loss_weight * survival_loss
+                    + args.base_regularization * regularization
+                )
             loss.backward()
             torch.nn.utils.clip_grad_norm_(head.parameters(), 1.0)
             optimizer.step()
             train_losses.append(float(loss.detach()))
+            train_nlls.append(float(censored_nll.detach()))
+            train_survival_losses.append(float(survival_loss.detach()))
+            train_regularizations.append(float(regularization.detach()))
 
         validation = evaluate(
             head,
@@ -428,6 +502,11 @@ def main() -> None:
         epoch_record = {
             "epoch": epoch,
             "train_loss": sum(train_losses) / len(train_losses),
+            "train_nll": sum(train_nlls) / len(train_nlls),
+            "train_survival_loss": sum(train_survival_losses)
+            / len(train_survival_losses),
+            "train_residual_regularization": sum(train_regularizations)
+            / len(train_regularizations),
             "validation": validation,
         }
         history.append(epoch_record)

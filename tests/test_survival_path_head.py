@@ -14,6 +14,8 @@ from sph.survival_path_head import (
     chain_crf_nll,
     expected_prefix_utility,
     global_survival_decode,
+    gold_prefix_survival_loss,
+    gold_prefix_survival_utility,
     greedy_markov_decode,
     prefix_censored_nll,
     survival_decode,
@@ -209,6 +211,30 @@ class SurvivalDecodeTest(unittest.TestCase):
         loss.backward()
         self.assertIsNotNone(edge_scores.grad)
         self.assertTrue(torch.isfinite(edge_scores.grad).all())
+
+    def test_gold_prefix_survival_utility_stops_at_other(self) -> None:
+        probabilities = torch.tensor(
+            [
+                [
+                    [[0.6, 0.3], [0.5, 0.2]],
+                    [[0.7, 0.1], [0.4, 0.4]],
+                    [[0.2, 0.2], [0.3, 0.3]],
+                ]
+            ],
+            requires_grad=True,
+        )
+        gold_indices = torch.tensor([[0, 0, 1]])
+        in_lattice = torch.tensor([[True, True, False]])
+        utility = gold_prefix_survival_utility(
+            probabilities.log(), gold_indices, in_lattice
+        )
+        expected = torch.tensor([0.6 + 0.6 * 0.7])
+        torch.testing.assert_close(utility, expected)
+        loss = gold_prefix_survival_loss(
+            probabilities.log(), gold_indices, in_lattice
+        ).mean()
+        loss.backward()
+        self.assertTrue(torch.isfinite(probabilities.grad).all())
 
 
 class SurvivalPathHeadTest(unittest.TestCase):

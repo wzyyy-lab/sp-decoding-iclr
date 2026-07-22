@@ -35,6 +35,7 @@ for NORMALIZATION in local absorbing_crf; do
       --batch-size 16 \
       --epochs 10 \
       --learning-rate 0.0003 \
+      --survival-loss-weight 0.0 \
       --seed "$SEED" \
       --train-split train \
       --validation-split validation \
