@@ -186,6 +186,8 @@ def evaluate(
     decoder_pairs = [
         ("global_survival", "global_map"),
         ("global_survival", "local_survival"),
+        ("global_survival", "base"),
+        ("global_map", "base"),
         ("local_survival", "local"),
     ]
     disagreement_stats = {
@@ -196,6 +198,17 @@ def evaluate(
             "realized_delta_on_path_disagreements": 0.0,
         }
         for left, right in decoder_pairs
+    }
+    score_diagnostics = {
+        "residual_abs_sum": 0.0,
+        "residual_square_sum": 0.0,
+        "residual_count": 0,
+        "residual_abs_max": 0.0,
+        "base_top1_margin_sum": 0.0,
+        "base_top1_margin_count": 0,
+        "residual_next_range_sum": 0.0,
+        "residual_next_range_count": 0,
+        "residual_range_exceeds_margin_count": 0,
     }
     for batch in loader:
         batch = to_device(batch, device)
@@ -228,6 +241,51 @@ def evaluate(
             )
             selected_loss = (
                 global_loss if normalization == "absorbing_crf" else local_loss
+            )
+        residual = output.residual_logits.float()
+        # Position zero has one real anchor predecessor; its K identical rows
+        # are only a static-shape implementation detail and must not be counted
+        # K times in calibration diagnostics.
+        real_residual = torch.cat(
+            [residual[:, :1, :1].flatten(), residual[:, 1:].flatten()]
+        )
+        residual_abs = real_residual.abs()
+        score_diagnostics["residual_abs_sum"] += float(residual_abs.sum())
+        score_diagnostics["residual_square_sum"] += float(
+            real_residual.square().sum()
+        )
+        score_diagnostics["residual_count"] += real_residual.numel()
+        score_diagnostics["residual_abs_max"] = max(
+            score_diagnostics["residual_abs_max"], float(residual_abs.max())
+        )
+        if batch["candidate_logits"].shape[-1] >= 2:
+            top_two = batch["candidate_logits"].float().topk(2, dim=-1).values
+            base_margin = top_two[..., 0] - top_two[..., 1]
+            residual_range = residual.amax(dim=-1) - residual.amin(dim=-1)
+            real_residual_range = torch.cat(
+                [
+                    residual_range[:, :1, :1].flatten(),
+                    residual_range[:, 1:].flatten(),
+                ]
+            )
+            comparable_base_margin = torch.cat(
+                [
+                    base_margin[:, :1].flatten(),
+                    base_margin[:, 1:, None]
+                    .expand_as(residual_range[:, 1:])
+                    .flatten(),
+                ]
+            )
+            score_diagnostics["base_top1_margin_sum"] += float(base_margin.sum())
+            score_diagnostics["base_top1_margin_count"] += base_margin.numel()
+            score_diagnostics["residual_next_range_sum"] += float(
+                real_residual_range.sum()
+            )
+            score_diagnostics["residual_next_range_count"] += (
+                real_residual_range.numel()
+            )
+            score_diagnostics["residual_range_exceeds_margin_count"] += int(
+                (real_residual_range > comparable_base_margin).sum().item()
             )
         selected_losses.append(selected_loss.float().cpu())
         local_losses.append(local_loss.float().cpu())
@@ -331,6 +389,37 @@ def evaluate(
     report["predicted_global_survival_utility"] = float(
         torch.cat(accumulators["predicted_global_survival_utility"]).mean()
     )
+    residual_count = score_diagnostics["residual_count"]
+    range_count = score_diagnostics["residual_next_range_count"]
+    margin_count = score_diagnostics["base_top1_margin_count"]
+    report["score_diagnostics"] = {
+        "residual_abs_mean": score_diagnostics["residual_abs_sum"]
+        / residual_count,
+        "residual_rms": (
+            score_diagnostics["residual_square_sum"] / residual_count
+        )
+        ** 0.5,
+        "residual_abs_max": score_diagnostics["residual_abs_max"],
+        "base_top1_margin_mean": (
+            score_diagnostics["base_top1_margin_sum"] / margin_count
+            if margin_count
+            else None
+        ),
+        "residual_next_range_mean": (
+            score_diagnostics["residual_next_range_sum"] / range_count
+            if range_count
+            else None
+        ),
+        "fraction_predecessor_rows_residual_range_exceeds_base_margin": (
+            score_diagnostics["residual_range_exceeds_margin_count"]
+            / range_count
+            if range_count
+            else None
+        ),
+        "learned_residual_scale": float(
+            head.residual_scale.detach().float().item()
+        ),
+    }
     report["decoder_disagreement"] = {}
     for key, stats in disagreement_stats.items():
         examples = stats["examples"]
@@ -541,6 +630,20 @@ def main() -> None:
         args.normalization,
         include_examples=True,
     )
+    # This is a post-selection diagnostic only. It is never used for checkpoint
+    # selection, but makes underfitting distinguishable from memorization.
+    final_train = evaluate(
+        head,
+        make_loader(
+            train_dataset,
+            candidate_k=args.candidate_k,
+            batch_size=args.batch_size,
+            shuffle=False,
+        ),
+        embedding,
+        device,
+        args.normalization,
+    )
     final_test = evaluate(
         head,
         test_loader,
@@ -570,6 +673,7 @@ def main() -> None:
         "parameter_count": sum(parameter.numel() for parameter in head.parameters()),
         "seconds": time.perf_counter() - start,
         "selected_epoch": int(best_checkpoint["epoch"]),
+        "final_train_diagnostic": final_train,
         "final_validation": final_validation,
         "final_test": final_test,
         "history": history,
