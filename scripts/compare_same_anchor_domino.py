@@ -224,6 +224,9 @@ def main() -> None:
         "canonical_metadata_sha256": sha256_file(metadata_path),
         "target_config_sha256": sha256_file(args.target / "config.json"),
         "domino_config_sha256": sha256_file(args.domino_draft / "config.json"),
+        "domino_remote_code_sha256": sha256_file(
+            args.domino_draft / "dflash.py"
+        ),
         "script_sha256": sha256_file(Path(__file__)),
         "dflash_commit": git_revision(PROJECT / "third_party" / "dflash"),
         "dflash_dirty_at_start": git_is_dirty(PROJECT / "third_party" / "dflash"),
