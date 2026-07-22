@@ -224,7 +224,11 @@ def main() -> None:
                 ),
                 "head_type": config["head_type"],
                 "normalization": config["normalization"],
-                "survival_loss_weight": float(config["survival_loss_weight"]),
+                # Checkpoints from the NLL-only probe predate this CLI option;
+                # absence therefore has the exact historical meaning 0.0.
+                "survival_loss_weight": float(
+                    config.get("survival_loss_weight", 0.0)
+                ),
                 "seed": int(config["seed"]),
                 "selected_epoch": int(checkpoint["epoch"]),
                 "data": str(data_path),
