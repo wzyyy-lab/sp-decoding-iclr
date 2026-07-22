@@ -186,6 +186,24 @@ def summarize(
     return summary
 
 
+def paired_summary(
+    block_results: list[dict[str, Any]],
+    left: str,
+    right: str,
+    *,
+    draws: int,
+    seed: int,
+) -> dict[str, Any]:
+    return {
+        "mean_difference": mean(
+            [record[left] - record[right] for record in block_results]
+        ),
+        "ci95_prompt_cluster_bootstrap": cluster_bootstrap_difference(
+            block_results, left, right, draws=draws, seed=seed
+        ),
+    }
+
+
 def main() -> None:
     args = parse_args()
     if not torch.cuda.is_available():
@@ -380,6 +398,20 @@ def main() -> None:
         for domain in sorted({record["domain"] for record in block_results})
     }
     paired: dict[str, Any] = {}
+    paired["domino_onpolicy_minus_dflash_top1"] = paired_summary(
+        block_results,
+        "domino_onpolicy",
+        "dflash_top1",
+        draws=args.bootstrap_samples,
+        seed=args.seed + 101,
+    )
+    paired["domino_onpolicy_minus_domino_backbone_top1"] = paired_summary(
+        block_results,
+        "domino_onpolicy",
+        "domino_backbone_top1",
+        draws=args.bootstrap_samples,
+        seed=args.seed + 102,
+    )
     domino_mean = overall["domino_onpolicy"][
         "mean_accepted_draft_tokens_round_weighted"
     ]
@@ -403,13 +435,43 @@ def main() -> None:
             "point_estimate_exceeds_threshold": difference >= threshold,
             "ci_excludes_zero": interval[0] > 0.0,
         }
+    paired_by_domain: dict[str, Any] = {}
+    for domain_index, domain in enumerate(sorted(by_domain)):
+        subset = [
+            record for record in block_results if record["domain"] == domain
+        ]
+        paired_by_domain[domain] = {
+            "domino_onpolicy_minus_dflash_top1": paired_summary(
+                subset,
+                "domino_onpolicy",
+                "dflash_top1",
+                draws=args.bootstrap_samples,
+                seed=args.seed + 200 + domain_index,
+            )
+        }
+        for k in sorted(set(args.oracle_k)):
+            oracle = f"dflash_oracle_k{k}"
+            paired_by_domain[domain][
+                f"{oracle}_minus_domino_onpolicy"
+            ] = paired_summary(
+                subset,
+                oracle,
+                "domino_onpolicy",
+                draws=args.bootstrap_samples,
+                seed=args.seed + 300 + 10 * domain_index + k,
+            )
     primary_key = "dflash_oracle_k16_minus_domino_onpolicy"
     if primary_key not in paired:
         raise ValueError("Gate 1b requires --oracle-k to include 16")
     primary_gate = paired[primary_key]
+    domains_with_positive_primary_gain = sum(
+        value[primary_key]["mean_difference"] > 0.0
+        for value in paired_by_domain.values()
+    )
     gate_pass = bool(
         primary_gate["point_estimate_exceeds_threshold"]
         and primary_gate["ci_excludes_zero"]
+        and domains_with_positive_primary_gain >= 2
     )
 
     metadata_path = args.canonical / "metadata.json"
@@ -456,6 +518,8 @@ def main() -> None:
         "overall": overall,
         "by_domain": by_domain,
         "paired_comparisons": paired,
+        "paired_comparisons_by_domain": paired_by_domain,
+        "domains_with_positive_k16_oracle_gain": domains_with_positive_primary_gain,
         "block_results": block_results,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
