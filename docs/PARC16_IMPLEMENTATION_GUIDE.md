@@ -148,7 +148,8 @@ PYTHONPATH=src:scripts python -m pytest -q \
   tests/test_parc.py \
   tests/test_collect_parc16_data.py \
   tests/test_parc_training.py \
-  tests/test_build_parc16_split.py
+  tests/test_build_parc16_split.py \
+  tests/test_open_perfectblend_manifest.py
 ```
 
 测试覆盖 zero-init identity、跨位置 noncausal gradient、gain gradient 等价、harm
@@ -161,8 +162,8 @@ prompt-balanced metrics 和 terminal-state semantics。
 正式数据 job `10169014` 仍因 A800 priority 排队；正式训练 job `10169018` 以
 `afterok:10169014` 依赖排队。尚无正式 validation/held-out EAL。
 
-## 10. 研究历史
+## 10. 发布范围
 
-完整的旧方案、审查、失败诊断和 profiler 保留在 `refine-logs/`、`idea-stage/`、
-`review-stage/`、`profile_output/`、`docs/experiment_log.md`。旧 PGCF/JAPD/PCLD
-capacity/same-set 数字只解释设计演化，不是当前方法的 held-out 证据。
+本仓库只发布 PARC-16 当前方案及其直接依赖。已经证伪或淘汰的 PGCF、JAPD、PCLD、
+GFPR、PLC、R048–R056 代码与中间审查记录不在当前版本中，避免把历史探索误认为
+可用方法。正式效果仍只能由冻结 checkpoint 后的 validation/held-out 结果支持。

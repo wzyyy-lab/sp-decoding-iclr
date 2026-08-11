@@ -1,6 +1,6 @@
 # PARC-16：DFlash 全局并行单链纠错
 
-本仓库是面向 DFlash / Domino speculative decoding 的完整研究工作区。当前主线是
+本仓库只发布面向 DFlash / Domino speculative decoding 的当前有效主线。当前方法是
 **PARC-16（Sealed-Heldout Fixed-Reference Parallel Correction）**：DFlash 一次并行
 产生完整 16-token provisional block，轻量 head 在所有 16 个位置和每位置 Top-16
 候选之间做一次全局、非因果混合，然后一次同时输出唯一一条 16-token 序列。
@@ -48,16 +48,17 @@ speculative verifier。
 | PARC-16 head、全局 action-node mixer、gain/harm loss | `src/sph/parc.py` |
 | 256-node full noncausal attention primitive | `src/sph/parallel_global_candidate_fusion.py` |
 | 正式数据 catalog、prompt/block sampler、验证指标 | `src/sph/parc_training.py` |
+| Open-PerfectBlend 270K reserve 构建 | `scripts/build_open_perfectblend_manifest.py` |
 | 270K reserve 的 train/validation/heldout 预划分 | `scripts/build_parc16_split.py` |
+| trace 共用的 anchor/context feature 工具 | `scripts/collect_canonical_blocks.py` |
 | full16 target/DFlash/Domino trace 收集 | `scripts/collect_parc16_data.py` |
 | 180K joint DFlash+PARC 正式训练与 validation | `scripts/train_parc16.py` |
 | 16-way A800 trace/materialization launcher | `scripts/slurm/parc16_full_data.sbatch` |
 | 正式训练/精确 resume launcher | `scripts/slurm/parc16_joint_train.sbatch` |
-| PARC focused tests | `tests/test_parc.py`, `tests/test_collect_parc16_data.py`, `tests/test_parc_training.py`, `tests/test_build_parc16_split.py` |
+| PARC focused tests | `tests/test_parc.py`, `tests/test_collect_parc16_data.py`, `tests/test_parc_training.py`, `tests/test_build_parc16_split.py`, `tests/test_open_perfectblend_manifest.py` |
 
-`scripts/`、`src/sph/` 和 `tests/` 同时保留此前 PGCF、JAPD、PCLD、GFPR、PLC、
-R048–R056 等路线的完整代码和负面结果诊断，便于追溯为什么最终收敛到 PARC-16；
-这些历史路线不属于当前在线架构。
+仓库刻意不包含已经证伪或淘汰的 PGCF、JAPD、PCLD、GFPR、PLC、R048–R056 等
+历史路线；这里只保留 PARC-16 的可执行依赖闭包。
 
 ## 环境
 
@@ -92,7 +93,8 @@ PYTHONPATH=src:scripts .venv/bin/python -m pytest -q \
   tests/test_parc.py \
   tests/test_collect_parc16_data.py \
   tests/test_parc_training.py \
-  tests/test_build_parc16_split.py
+  tests/test_build_parc16_split.py \
+  tests/test_open_perfectblend_manifest.py
 
 .venv/bin/python -m py_compile \
   src/sph/parc.py src/sph/parc_training.py \
@@ -110,9 +112,6 @@ PYTHONPATH=src:scripts .venv/bin/python -m pytest -q \
 - [实验 tracker](refine-logs/parallel-global-head-v4/EXPERIMENT_TRACKER.md)
 - [full16 几何与 reserve 修订](refine-logs/parallel-global-head-v4/FULL16_GEOMETRY_AND_RESERVE_AMENDMENT_20260810.md)
 - [最新任务状态](refine-logs/parallel-global-head-v4/FORMAL_RUN_STATUS.md)
-- [完整历史实验日志](docs/experiment_log.md)
-- [机器可读结果登记](docs/results_registry.json)
-- [研究产物清单](MANIFEST.md)
 
 ## 数据与权重
 

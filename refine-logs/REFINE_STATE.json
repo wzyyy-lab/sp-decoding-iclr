@@ -1,9 +1,0 @@
-{
-  "phase": "refine",
-  "round": 3,
-  "agent_id": "/root/gcls_refine_reviewer",
-  "last_score": 8.05,
-  "last_verdict": "REVISE_EXPERIMENT_GO",
-  "status": "completed",
-  "timestamp": "2026-08-04T19:55:00+08:00"
-}
