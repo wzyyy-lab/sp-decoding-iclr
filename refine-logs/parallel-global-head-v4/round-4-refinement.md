@@ -1,0 +1,475 @@
+# Round-4 Refinement：PARC-16 / Sealed-Heldout Fixed-Reference Parallel Correction
+
+## Problem Anchor（verbatim，冻结）
+
+- **Bottom-line problem：** 在不改变 DFlash 一次并行生成完整 16-token block 的前提下，设计一个轻量 head，让完整草稿中的每个位置在最终选 token 前都能看到其余全部 15 个位置，并一次同时输出唯一一条 16-token 序列；fixed EAL、dynamic EAL 和同栈 A40 SGLang 端到端吞吐都必须至少达到 same-job released Domino 的 `1.15x`，越高越好。
+- **Must-solve bottleneck：** 当前 full16 disjoint development 的 pure DFlash EAL 为 `6.0685131195`，released Domino 为 `7.2395529640`，硬目标为 `8.3254859086`，pure-base Top16 oracle 为 `10.9092565598`。已有证据排除了“候选不存在、head 太慢、same-set 容量太小、只需增加训练步数或扩大 selector”这些解释：PGCF 在 512 blocks 可精确拟合但 disjoint EAL 仅 `6.10277`；JAPD-D256 在容量集达到 `99.8627%` candidate accuracy 但 broader same-set recovery 仅 `5.5133%`、harm `18.1641%`；PCLD-16R 在稳定训练 support 上达到 candidate agreement `99.9876%`、J2 `314/314` 和 EAL `9.52539`，但完整 early-error population 只有 `322/411=78.3455%`、oracle recovery `66.9209%`、harm `6.25%`。同时，rank-16 LoRA、588M full adaptation 和 full-vocabulary KL 的 held-out 增益接近零。新方法必须直接解决两个相连问题：把整条 DFlash 并行草稿作为一个 noisy sequence 做全局一次性纠错；并以完整 accepted-prefix 收益和破坏 base 正确前缀的风险共同决定 `KEEP` 还是编辑，而不是继续在过滤 support 上拟合平均 token loss。
+- **Non-goals：** 不做 Domino/GRU/Markov 式自回归，不做 selected-token feedback，不做串行 target seed/decode，不做 Jacobi 或任何迭代 refinement，不做 Viterbi/DP sequence decoding，不做 beam/tree/trie/forest/multipath，不让 Top16 变成路径维，不增加 ordinary verifier 之外的在线 target inference，不复活 PCLD/JAPD/PGCF 的 width、LR、schedule、loss-weight 或 threshold sweep，不以 R050–R056 的 off-spec 结果授权主线。
+- **Constraints：** 单次 head 必须同时消费完整 `[B,16,*]` DFlash online features；每个输出位置必须通过无 causal mask 的全局 mixer 看到完整 16-position provisional sequence；一次产生 `[B,16,16]` scores，并以一次逐位置 argmax 得到唯一 `[B,16]`。Top16 只作每位置候选轴；最终被选择的 token 在 argmax 前不得反馈给任何位置。线上只能使用 ordinary DFlash hidden/base logits/Top16 IDs、冻结 embedding/LM-head rows、anchor/context feature；target clean continuation 只作离线监督。新增在线参数首版不超过 `10.75M`，必须 eager-to-eager 公平 profile，且 accepted-length 主机制过 disjoint gate 前不做 SGLang 工程。
+- **Success condition：** 第一项科学证据直接来自严格 prompt-disjoint 的约100K-prompt正式训练：固定5K validation只选checkpoint，约5K held-out只在weights/config锁定后裁决。held-out fixed EAL和dynamic EAL均须至少达到same-job released Domino的`1.15x`，三个域均不退化；最后同栈SGLang A40 tokens/s paired 95% CI下界至少`1.15x` Domino。任何capacity/same-set/smoke、串行、迭代、多路径、额外在线target、或只提高suffix/token accuracy而未提高accepted prefix的结果都不算成功。
+
+## Latest User Mandate（authoritative）
+
+容量集、same-set replay、512/2K训练不再作为效果实验，也不提交独立GPU smoke训练。
+第一项科学实验直接使用约100K prompts的full16真实训练，并预先固定
+`90K train / 5K validation / 5K held-out`：只用validation选择checkpoint，held-out
+只在选择完成后打开；DFlash、released Domino与PARC在完全相同的validation/held-out
+prompts和evaluator上比较。训练集EAL只作诊断，绝不再称为验证效果。实现前只允许运行
+本地unit/shape/gradient检查，目的是避免正式大作业因明显代码错误崩溃，不构成实验阶段。
+
+## Round-4 数据协议闭环
+
+Round-4 reviewer确认方法、架构、概率定义、数值界、loss与no-smoke执行均已闭合；唯一
+blocker是validation/held-out曾被用于训练阈值或post-heldout决策。最终协议只有一条：
+
+> 所有会影响训练、loss、停止或数据规模的量只能来自90K train；5K validation只选择
+> checkpoint；held-out在weights/config锁定后首次且仅一次打开，并在同一job内共同运行
+> DFlash、released Domino与PARC。held-out打开后禁止任何训练、refresh、扩数据或改方法。
+
+具体修订如下：
+
+1. `e_num_cert`、`delta_min`、ambiguous feasibility与support-drop stop只从train导出；
+2. validation不进入loss阈值、launch gate、dual状态或停止规则；
+3. held-out baseline不提前物化，正式job中与PARC同次产生；
+4. 删除held-out结果触发的1.42M expansion与on-policy refresh；未过门即关闭route；
+5. global-local/control不再作为held-out主结果的前置任务，也不支持本轮confirmatory claim；
+6. 明确180K×batch8为1.44M block draws，约两次最多720K-record epoch。
+
+## Round-3 规范闭环
+
+Round-3 reviewer给出`8.0 REVISE`且确认架构无drift；剩余规范项按下述方式关闭：
+
+1. 写死`q=softmax(A)`、temperature1和FP32 log-softmax/product；
+2. identity证明改用实际BF16 live margin与FP32 reference margin的误差不等式；
+3. `delta_min`同时受数据全覆盖numeric replay和固定最大margin-gradient约束；
+4. 删除模糊的support-drop规则，改成固定eval cadence/window/patience；
+5. matched-local完整定义，但遵循用户要求，只在主模型真实held-out成功后运行；
+6. on-policy refresh永远保留最初released immutable reference。
+
+## Round-2 裁决与进一步收敛（保留的来路）
+
+Round-2 reviewer确认 immutable reference、conditional gain gradient和逐block harm
+upper bound的主体成立，评分从`5.6 RETHINK`升至`7.2 REVISE`，在线合同继续全部
+PASS。以下改动关闭剩余边界：
+
+1. 所有protected gold score一律用它在当前live Top16中的`r_live`，禁止误用
+   reference rank0；
+2. 在任何训练前，以production BF16和FP32 replay误差冻结`delta_min`；近并列block
+   fail-closed，先证明其占比不会使1%约束先验不可行；
+3. 明确gain梯度仅在fixed live support区域内piecewise exact，且它是“安全前缀已由
+   constraint保持”条件下的suffix gain，不声称无条件total EAL；
+4. 删除L4 fallback；D256/L2失败不允许width rescue；
+5. Round-2曾保留的2K/25K分级已被最新用户合同全部删除；第一项科学run直接是90K训练、5K validation和约5K held-out；
+6. Round-2曾建议frozen/joint recipe deletion；最新主目标优先合同只授权先跑joint main，任何deletion/control都必须等held-out主门通过；
+7. dual EMA初值和infeasibility stop rule写死，M1 recovery只保留一个公式。
+
+## Round-1 裁决与实质修改（保留的来路）
+
+接受 reviewer 的 `RETHINK 5.6/10`。首稿的概率乘积风险、移动 base、soft-summary
+接口和 joint-training contribution 均删除或重写；不是调权重，也不是给旧方案换名字。
+
+1. 删除 `R=1-prod q_keep`。新约束直接从部署 argmax 的 protected-prefix 最大
+   competitor margin 推导，并给出逐 block 的确定性 harm 上界。
+2. `a_base` 不再来自 live backbone。训练开始前冻结一个 immutable reference
+   DFlash snapshot；所有 protected positions 和 baseline EAL 都相对这个 reference。
+3. 删除 Top1+soft-summary carrier。保留全部 `16×16` edit-action nodes，一次无 mask
+   全局交换；不把这个 carrier 当作 novelty，明确它复用 PGCF family 的已验证语义。
+4. 删除“joint representation”贡献。joint DFlash optimization只是main recipe，不单独
+   支持论文claim；matched deletion只能在主held-out结果成功后运行，不能延迟主实验。
+5. D-PACE 不再对整段平均优化。新增收益只定义在 reference 已接受长度之后；训练
+梯度是在fixed live support区域内该条件增量 accepted-length surrogate的精确一阶梯度。
+6. 补入 Speculative Correction 边界：其多轮大型 diffusion refiner 已覆盖 broad
+   draft-then-refine 叙事；本方法只主张 strict Top16、one-pass、lightweight、single-chain、
+   ordinary lossless verifier 下的 fixed-reference safe policy improvement。
+
+## Revised Thesis
+
+> **PARC-16 把并行 draft correction 写成相对一个固定 DFlash reference 的安全策略
+> 改进：一次 full-action global head 同时给出 16 个位置的 Top16 edit advantages；训练
+> 只最大化 reference 接受长度之后的条件增量，并以 reference-margin-normalized 的
+> blockwise 上界约束任何会破坏 reference 正确前缀的 deterministic edit。**
+
+贡献焦点只有这个 fixed-reference gain-constrained objective。full-action Transformer、
+Top16、zero identity、joint optimization均是 carrier 或 recipe，不单独声称新颖。
+
+## Online Architecture：Full Edit-Action Tensor，One Call / One Chain
+
+### Inputs and immutable deployment graph
+
+普通 DFlash 一次产生：
+
+- hidden `H in R[B,16,2560]`；
+- pure-base Top16 IDs `C in N[B,16,16]` 与 logits `Z`；
+- anchor token embedding 与冻结 token embedding rows。
+
+没有 reference model、target model或 teacher tensor进入 online graph。reference 只在
+离线训练中定义安全基线。
+
+对 position `i`、candidate `k`，构造显式 edit-action node：
+
+```
+u_i       = W_h RMS(H_i) + W_e RMS(E_anchor)
+delta_ik  = W_e (RMS(E[C_ik]) - RMS(E[C_i0]))
+x_ik      = LN(u_i + delta_ik + W_c(u_i * delta_ik)
+               + W_phi(phi_ik) + p_i + r_k)
+```
+
+`phi_ik` 只含在线 pure-base 标量：centered logit、conditional log-prob、相对 Top1
+gap、normalized rank 与 position entropy。全部 256 nodes 同时通过 `L=2, D=256,
+H=8, FFN=512` 的无 causal mask self-attention。每个 action node在第一层就能访问所有
+16位置、全部256个候选；中间只有连续 hidden states，没有 token argmax、token embedding
+回灌、离散更新或第二轮。
+
+最终输出：
+
+```
+A_i0 = 0
+A_ik = (Z_ik - Z_i0) + d_ik, k>0
+d     = zero-init linear(final_action_states)
+proposal_i = C_i,argmax_k A_ik
+```
+
+训练分布严格定义为
+
+```
+q_bi(k) = softmax_k(A_bi:.float())_k
+```
+
+temperature固定为1，不做temperature sweep；`log_softmax`、gold probability、prefix
+products和detached weights全部FP32。M0不再是GPU实验，而是在实现单测中用autograd
+直接比较detached-weight loss与`-G`的梯度。
+
+一次调用产生一个 `[B,16,16]` tensor，一次逐位置 argmax产生唯一 `[B,16]` chain。
+rank0 为当前 live DFlash 的 `KEEP` action；固定为零只是可解释 gauge和精确 step-0
+identity，不作为 novelty。
+
+该 carrier 直接复用并改写已通过 mechanics/profile 的 PGCF full-node family，而不是
+重新发明 soft-summary head。冻结实现为`D256/L2`，精确新增参数`2,438,400`，约占
+537.427M DFlash的`0.454%`；checkpoint后derived BF16 table为`77,791,232 bytes`。
+完整账本固定为：shared `W_h+W_e=1,310,720`，position/rank embeddings `8,192`，
+five-scalar projection（含bias）`1,536`，compatibility `W_c=65,536`，input LN
+`512`，两个full-node blocks共`1,051,136`，output LN+zero-bias-free scorer `768`。
+Transformer使用pre-norm affine LayerNorm、bias-free QKV/out/FFN、FFN multiplier2、
+8 heads、learned relative-position bias和same-position bias、dropout0。不存在L4或width
+fallback：既有PGCF已经证明该carrier能精确拟合512 blocks，objective失败不能用容量
+rescue掩盖。
+
+## Fixed Reference Contract
+
+训练开始前冻结 released DFlash snapshot `pi_ref`。对每条训练 block，用同一 clean
+target continuation离线记录：
+
+- `a_b`：`pi_ref` Top1 chain 的 deterministic accepted length；
+- `y_bi`：clean target token；
+- `delta_b`：reference protected prefix `i<a_b` 上最小 Top1-vs-runner-up FP32
+  margin；
+- prompt identity与 block order。
+
+`y_bi`的authority是离线用目标模型按greedy target-only continuation生成的token IDs；
+它们只作label，训练online forward不运行target。reference、train、select和heldout均用
+相同生成定义，ordinary verifier仍是最终accepted-length authority。
+
+这些量始终 stop-gradient，且 joint training 后不重算。live DFlash 的 Top16仍每步
+重算，从而训练部署一致；但它不能通过缩短自身 prefix 来移除受保护位置。
+
+若某个 reference-protected gold token在 live Top16中消失，则该 block 的 safety
+upper bound直接记为1，gain分支暂时mask；full-vocabulary base loss向 backbone提供把
+token恢复到candidate support的梯度。它不能 fail-open 为更短 `a_b`。
+
+## Objective：Fixed-Reference Incremental Acceptance
+
+### Conditional incremental gain
+
+令 `r_bi` 为 clean token在 **live** Top16中的 rank。对 `i>=a_b`，令 `h_b` 为首个
+gold不在 live Top16的位置；若到末尾始终可达则 `h_b=16`。定义
+
+```
+G_b(q) = sum_{t=a_b}^{h_b-1} prod_{j=a_b}^{t} q_bj(r_bj).
+```
+
+它不是 total token accuracy：它只表示在 reference 正确前缀被安全保留这一约束下，
+期望多接受多少 token。`a_b=16` 或 frontier candidate不可达时自然没有虚假 suffix
+reward。
+
+使用 detached coefficient实现 `-G_b/16` 在fixed live support区域内的精确一阶梯度：
+
+```
+w_bi = stopgrad(
+          sum_{t=max(a_b,i)}^{h_b-1}
+              prod_{j=a_b}^{t} q_bj(r_bj))
+
+L_gain = (1 / (16 B)) sum_b sum_{i=a_b}^{h_b-1}
+             w_bi * [-log q_bi(r_bi)].
+```
+
+这里不再使用 `0.5q+0.5` smoothing，因为那会改变所声称的 incremental utility。
+产品最长16项且在FP32计算。只要当前局部区域内live candidate IDs、gold ranks与`h_b`
+不变，且TopK/support选择全部stop-gradient，上式梯度正好等于
+`grad_theta[-mean_b G_b/16]`。TopK换位或gold进出support时目标piecewise discontinuous，
+不声称全局可微等价。`G_b`也不是无条件total EAL：它是在reference protected prefix
+由下面hard-risk constraint保持时的conditional suffix-gain surrogate。
+
+### Deterministic-harm upper bound
+
+对reference protected position`i<a_b`，若reference token仍在live candidates，令
+`r_live_bi`为`y_bi`在**当前live Top16**中的唯一rank，定义
+
+```
+m_bi = max_{k: C_bik != y_bi} A_bik - A_bi,r_live_bi
+M_b  = max_{i<a_b} m_bi.
+```
+
+部署的 block harm 为 `H_b=1[M_b >= 0]`（用 `>=` 保守覆盖candidate-order tie）。
+禁止用reference rank0代替`r_live_bi`：joint training后gold可以位于live rank`k>0`。
+
+令reference最弱正确margin为
+
+```
+delta_bi = Z_ref,bi0 - max_{k>0} Z_ref,bik,
+delta_b  = min_{i<a_b} delta_bi,
+gamma_b = delta_b / 2.
+```
+
+对非空且FP32非并列的 protected prefix，定义
+
+```
+Hbar_b = ReLU(1 + M_b / gamma_b).
+```
+
+full16数据收集时，只对**90K train records**沿同一production BF16算子路径保存
+reference Top16 IDs/logits，并只对这16个已选rows做FP32 gathered-dot replay。定义该
+训练语料和算子路径上的数值证书
+
+```
+e_num_cert = max_records,protected |
+               delta_live_BF16 - delta_ref_FP32 |
+g_max      = 64
+delta_min  = max(2*e_num_cert, 2/g_max, 2^-14).
+```
+
+`g_max=64`在看任何EAL前固定，不做grid；因此即使`e_num_cert=0`也有正下界，且stable
+branch的margin derivative至多64。证书范围明确限定为这次90K train语料、相同A40
+BF16 kernel和相同checkpoint。validation与held-out不参与该最大值、训练分类或任何
+launch/stop决策。最终held-out job可以用训练阶段已冻结的`delta_min`做只读numeric
+audit，但审计结果不得回写训练或触发重训。
+
+若`delta_b<=delta_min`，整个block标为ambiguous并令`Hbar_b=1`。train数据准备完成后、
+正式训练同一个launcher启动前，必须只在train报告其prompt-balanced比例；若比例本身
+`>1%`，当前surrogate约束先验不可行，正式训练fail-fast，不能改阈值或偷换support。
+
+如果reference token掉出live Top16，`Hbar_b=1`；若`a_b=0`，`Hbar_b=0`。stable
+branch只在`delta_b>delta_min`时做除法，因此constraint margin gradient满足
+`2/delta_b < 2/delta_min <= g_max=64`。
+
+该分段线性（不是smooth）归一化没有手调温度，并有两个直接性质：
+
+1. step-0实际`M_b=-delta_live,b`。对stable block，
+   `delta_ref,b>delta_min>=2e_num_cert`，故
+   `delta_live,b>=delta_ref,b-e_num_cert>delta_ref,b/2=gamma_b`，所以`Hbar_b=0`；
+2. 任何 `M_b>=0` 的 deterministic harm 都有 `Hbar_b>=1`，因此逐 block
+   `H_b <= Hbar_b`。
+
+于是约束
+
+```
+PromptMean(Hbar_b) <= 0.01
+```
+
+是实际 block harm 的保守上界，而非概率 proxy。binding validation仍使用真实
+deterministic accepted length与 `proposal[:a_b] != target[:a_b]` 的 prompt-balanced
+harm；upper bound只负责训练。
+
+### Two formal claims（方法边界）
+
+**Proposition 1 — conditional gain gradient.** 在一个candidate IDs、gold live ranks和
+support horizon固定的局部参数区域内，上述detached-weight `L_gain`与`-Mean(G_b)/16`
+具有相同参数梯度。证明由product rule重排：每个`log q_i`的系数正是所有包含位置
+`i`的suffix products之和。跨TopK边界不作全局可微主张。
+
+**Proposition 2 — pointwise policy-harm envelope.** 对每个stable reference block，若
+deterministic output破坏任一reference accepted-prefix token，则`M_b>=0`，从而
+`Hbar_b>=1=H_b`；未破坏时`H_b=0<=Hbar_b`。ambiguous/support-drop分支直接取1，
+空prefix分支两者均0。因此对任意非负prompt权重，`PromptMean(H)<=PromptMean(Hbar)`。
+这两个命题共同限定贡献：只在安全constraint保持reference prefix时，`G_b`才解释为
+相对reference的新增accepted suffix；它不宣称对任意factorized proposal给出无条件
+total-EAL保证。
+
+### Primal-dual update and gradient routing
+
+基础 DFlash loss使用当前 live full-vocabulary logits上的官方 D-PACE，按每block/16
+归一化，记作 `L_base`。它只更新 DFlash；target model和 lexical table冻结。
+
+主问题为
+
+```
+min_{theta_DFlash, theta_PARC}  L_base + L_gain
+subject to PromptMean(Hbar) <= 0.01.
+```
+
+每个batch先按prompt均匀采样、再在prompt内均匀采block，所以 batch mean 是
+prompt-balanced estimator。primal loss为
+
+```
+L_primal = L_base + L_gain + lambda * (Mean(Hbar) - 0.01).
+```
+
+冻结第一版：AdamW primal LR沿released DFlash recipe；`lambda_0=0`，每次 optimizer
+step 后做 projected dual ascent
+
+```
+c_t      = 0.95 c_{t-1} + 0.05 * stopgrad(Mean(Hbar)-0.01)
+lambda   = clip(lambda + 0.05*c_t, 0, 100).
+```
+
+不做 loss-weight、threshold、temperature或lambda grid。`L_base`只到DFlash；
+`L_gain`和constraint到PARC并经`H/Z`到DFlash；TopK IDs/reference quantities均
+stop-gradient。dual EMA固定`c_0=0`。正式训练每10,000 optimizer steps在固定5K
+validation上评估一次，仅用于checkpoint选择。同时在训练开始前冻结的5K-train-prompt
+audit子集上计算停止诊断；它仍属于train，不与validation/held-out重叠。若`lambda=100`
+触顶且train-batch EMA violation仍`>0`，立即标记`constraint_infeasible`。support-drop
+stop从step20,000后启用：若连续4个train-audit窗口的
+`PromptMean(support_drop)>1%`，且第4个值仍高于第1个值的80%，同样判infeasible并
+停止。validation绝不影响这些训练阈值或停止状态。所有binding harm统一为
+`PromptMean(H)`，不能混用block mean。
+报告三项未加权loss、gradient norm、lambda、support-drop rate、ambiguous rate、
+`Mean(Hbar)`和actual harm，不能只报总loss。
+
+## Why This Is Not the Closed Routes
+
+- **不是普通 D-PACE：** D-PACE优化 total expected accepted length；这里以 immutable
+  reference 把问题严格分解成“安全保留已有前缀”和“只优化其后的新增接受长度”。
+- **不是旧 safety hinge：** 旧实现逐位置求和、固定loss weight；这里使用最危险的
+  blockwise competitor margin、reference-margin normalization、可证明的 hard-harm
+  upper bound和prompt-level primal-dual约束。
+- **不是 PGCF 重跑：** PGCF Gate2使用全prefix curriculum/teacher KL、冻结 backbone，
+  没有 fixed-reference incremental utility；其512容量成功只复用来证明 carrier够用。
+- **不是 JAPD/PCLD：** 不使用 target logits/hidden/KL/latent sidecar，不过滤掉 legacy
+  early-error population，不以 token/J2 accuracy代替 accepted-prefix reward。
+- **不是 Domino：** 无causal state、GRU或selected-prefix feedback。
+- **不是 Speculative Correction：** 无大型refiner、diffusion、response-level edit或多轮
+  denoising；线上只有一次轻量 Top16 head与普通 verifier。
+
+这仍是一个窄的 objective-level contribution。论文强度必须来自上界推导和强结果；
+若 disjoint gain不大，不用“全局纠错”叙事掩盖失败。
+
+## Main-Goal-First Validation
+
+### R0：implementation safeguards（不是实验）
+
+只在本地测试里验证full16 shape、256-node global visibility、一次`[B,16]`输出、
+step-0 token identity、`q=softmax(A)`、detached-gradient等价、`H<=Hbar`枚举、live-rank、
+support-drop fail-closed和immutable-reference反例。禁止提交单独GPU smoke/capacity job；
+这些检查通过后直接进入100K数据收集与正式训练。
+
+### R1：100K manifest先切分，held-out随后封存
+
+复用已清洗的Open-PerfectBlend约100K unique prompt manifest，但旧cache只有15个draft
+positions，完全禁止用于PARC训练。按prompt和domain在任何新label生成前固定：
+
+- 90,000 train prompts；
+- 5,000 validation prompts；
+- 余下约5,000 held-out prompts。
+
+三者prompt-disjoint，并继续排除已有Phase3/development/formal重叠。train与validation
+每prompt使用同一冻结anchor policy生成最多8个full16 blocks；train保存released
+reference、训练所需online inputs和offline clean target labels，validation只保存评估
+authority。held-out此时只封存prompt/context/anchor manifest，不运行DFlash、Domino、
+PARC，不产生任何baseline或汇总统计；其full16 authority与三套系统输出统一延迟到
+checkpoint锁定后的唯一正式held-out job。任何train EAL不得进入效果结论。
+
+### R2：唯一主模型的正式训练
+
+直接训练`global PARC D256/L2 + joint DFlash`，不先跑frozen、local、capacity或小数据
+arm。冻结首版recipe：batch8 blocks、无gradient accumulation、180,000 optimizer steps，
+即1.44M block draws（约两次最多720K-record epoch）；head LR`3e-4`、DFlash LR`1e-5`、
+2,000-step warmup、cosine decay到
+各自初始LR的10%、AdamW、gradient clip1。每10,000 steps只在固定5K validation上
+计算prompt-balanced EAL/harm并保存checkpoint；训练集指标只用于诊断NaN/优化趋势。
+
+checkpoint选择规则只有一个：在`PromptMean(H)<=1%`的checkpoint中最大化validation
+prompt-balanced EAL，完全tie取更早step。若没有checkpoint满足harm门，正式训练失败。
+选定checkpoint后锁定所有weights/config，才允许打开held-out；不根据held-out回调任何
+超参数。
+
+### R3：唯一binding held-out效果裁决
+
+global checkpoint由validation规则锁定后，立即冻结weights、训练数据、loss、architecture
+和所有config。随后第一次打开同一约5K held-out，并在**同一个正式job**中对每个prompt
+共同运行released DFlash、released Domino与PARC的fixed和dynamic evaluator：
+
+- fixed EAL `>=1.15x` same-job released Domino；
+- dynamic EAL `>=1.15x` same-job released Domino；
+- actual harm统一为`PromptMean(H)<=1%`；
+- fixed/dynamic的chat/code/math三域均不低于same-job Domino；
+- primary同时报告相对reference和Top16 oracle的EAL gap recovery，但不能替代EAL门。
+
+任一binding门失败即关闭当前route；不做kernel、小修、扩到1.42M、on-policy refresh、
+改loss/width或再次使用该held-out。held-out首次打开后，当前方法的任何训练或数据更新
+永久禁止。
+
+### R4：机制control不阻塞主目标
+
+只有R3全部过门后，才可把matched local control作为后验机制研究。它与成功global模型
+具有完全相同的256 nodes、D256/L2、inputs、loss、joint-DFlash状态、optimizer、batch、180K steps、
+validation cadence和checkpoint rule；唯一差异是attention mask只允许同一position的
+16 candidates互见，禁止跨position attention。但它不得复用已打开的主held-out，只能
+在validation或未来新封存数据上标为exploratory；因此本轮不做confirmatory
+global-visibility归因。constraint deletion同理。两者绝不延迟R3主效果裁决。
+
+### R5：system gates
+
+R3已在唯一held-out job内同时完成fixed和dynamic裁决。只有两者都过门才做系统验证：
+
+- fixed EAL `>=1.15x` same-job released Domino；
+- dynamic EAL `>=1.15x` same-job Domino；
+- chat/code/math均不退化；
+- complete eager A40计入base vocab GEMM、FP32 Top16、77.8MB table gather、完整head、
+  argmax，并与released eager Domino公平比较。
+
+随后才做同栈SGLang集成，paired ABBA bootstrap的TPS ratio 95% CI lower必须`>=1.15`。
+效果不过门时不做kernel小修，吞吐不过门时才在固定语义下profile/fuse。
+
+系统联合必要条件明确写为
+
+```
+T_PARC / T_Domino
+  <= (EAL_PARC + 1) / [1.15 * (EAL_Domino + 1)].
+```
+
+在最低EAL门`8.3254859086`处，cycle ratio必须`<=0.98417`；旧PGCF eager profile只
+证明成本有希望，新的delta-node与最终checkpoint仍须完整重测。
+
+## Stop Rules
+
+- moving reference、suffix mask或same-set替代heldout：实验无效，修语义后重跑；
+- held-out的任一fixed/dynamic/domain/harm门失败：当前route关闭，不增加参数、不扩数据、
+  不refresh、不再次打开该held-out，也不做系统优化；
+- held-out首次打开后：禁止任何model/data/loss/policy训练更新；
+- acceptance全部过门、TPS失败：只允许不改weights、architecture、tokens或decision的
+  kernel/fusion/static-buffer工程优化；不允许D256/L1等模型变体。
+
+## Reviewer Blocker Closure Map
+
+| Round-1 blocker | Closure |
+|---|---|
+| probability risk != deterministic harm | reference-normalized block max-margin upper bound，证明 `H<=Hbar` |
+| moving `a_base` | immutable step-0 reference；live support drop fail-closed |
+| soft summary/JAPD重复 | 删除soft summary，保留完整256 edit-action nodes；carrier不作为novelty |
+| loss尺度/gradient routing未定义 | 两个loss均/16，系数1；完整primal-dual和routing已写死 |
+| 三臂不识别joint | 删除joint contribution；按用户主目标优先，正式主模型直接joint训练，controls仅在成功后归因 |
+| Speculative Correction边界遗漏 | 显式引用并把claim收窄到strict one-pass Top16 lossless setting |
+| probability definition | `q=softmax(A.float())`，temperature1，FP32 log-softmax/product与梯度单测 |
+| tiny nonzero reference margin | 仅train-corpus gathered replay证书 + `g_max=64`正下界；ambiguous fail-closed |
+| reference rank after joint update | protected score只用当前live `r_live`，support drop单独fail-closed |
+| small-set efficacy detour | 用户最新合同删除全部capacity/2K/25K训练；直接90K train + 5K validation + 5K held-out |
+| matched-local歧义 | 成功后运行；除cross-position visibility mask外data/params/optimizer/selection完全相同 |
+
+## Remaining Empirical Risk
+
+理论闭环不等于效果成立。最危险的事实仍是旧100K axial global只增加约0.24 EAL，
+PGCF在小disjoint集几乎不迁移，且PCLD/JAPD暴露了early-error population上的强失败。
+本轮唯一值得检验的新假设是：旧loss把大量梯度花在reference已接受位置和无收益suffix，
+并以逐位置平均hinge错误定价block harm；固定reference的增量utility与block约束能否把
+已有但弱的global signal集中成真实accepted-prefix gain。现在不再通过容量集或小规模
+中间门间接回答；R2在90K prompts上正式训练，R3用独立5K held-out与同次Domino直接
+裁决`1.15x`目标。

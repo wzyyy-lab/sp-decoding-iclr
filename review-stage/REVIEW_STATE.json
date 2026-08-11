@@ -1,0 +1,16 @@
+{
+  "round": 0,
+  "agent_id": "/root/causal_lattice_review",
+  "status": "stopped_threshold_met",
+  "last_score": 7,
+  "last_verdict": "almost",
+  "pending_experiments": [
+    "10152908",
+    "10152987",
+    "10153242",
+    "10153245",
+    "10153246",
+    "10153247"
+  ],
+  "timestamp": "2026-08-08T18:03:00+08:00"
+}

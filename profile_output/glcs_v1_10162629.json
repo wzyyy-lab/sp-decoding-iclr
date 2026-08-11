@@ -1,0 +1,39 @@
+{
+  "status": "completed",
+  "job_id": "10162629",
+  "host": "gpu3-9",
+  "device": "NVIDIA A40",
+  "shape": {
+    "batch": 1,
+    "positions": 15,
+    "candidates": 16,
+    "global_width": 512,
+    "global_modes": 4
+  },
+  "parameters": {
+    "glcs": 61074687,
+    "domino": 50823168,
+    "ratio": 1.201709562851336,
+    "fraction_of_headless_draft": 0.11364271663213175
+  },
+  "runtime_table_bytes": {
+    "glcs_lexical": 155582464,
+    "glcs_gru_input": 933494784,
+    "domino_gru_input": 933494784
+  },
+  "latency_ms": {
+    "glcs_raw_eager": 10.61434326171875,
+    "glcs_preprojected_eager": 10.871854248046875,
+    "glcs_cuda_graph": 1.827430419921875,
+    "domino_eager": 3.6506008911132812,
+    "domino_cuda_graph_triton": 2.2542233276367187,
+    "glcs_raw_over_domino_eager": 2.907560584767681,
+    "glcs_preprojected_over_domino_eager": 2.978099927196208,
+    "glcs_graph_over_domino_graph": 0.8106696428510991
+  },
+  "checks": {
+    "preprojection_preserves_tokens": true,
+    "graph_preserves_tokens": true,
+    "domino_graph_preserves_tokens": true
+  }
+}

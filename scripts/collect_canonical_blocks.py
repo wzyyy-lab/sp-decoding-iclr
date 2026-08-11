@@ -271,6 +271,12 @@ def collect_sample(
         topk_logits, topk_ids = torch.topk(
             base_logits.float(), k=top_k, dim=-1, sorted=True
         )
+        base_greedy_ids = base_logits.float().argmax(dim=-1)
+        if not torch.equal(topk_ids[..., 0], base_greedy_ids):
+            raise RuntimeError(
+                "torch.topk rank one differs from the released-DFlash "
+                "greedy argmax action"
+            )
         base_logsumexp = torch.logsumexp(base_logits.float(), dim=-1)
         gold_gpu = gold_ids.unsqueeze(0)
         base_top1_match = topk_ids[..., 0] == gold_gpu
@@ -300,13 +306,25 @@ def collect_sample(
                 "gold_ids": gold_ids.cpu().to(torch.int32),
                 "parallel_hidden": parallel_hidden[0].cpu().to(torch.bfloat16),
                 "base_topk_ids": topk_ids[0].cpu().to(torch.int32),
+                # Stored separately so downstream code can prove that lattice
+                # rank zero is the exact released-DFlash greedy action, even
+                # if float16 serialization creates apparent top-logit ties.
+                "base_greedy_ids": base_greedy_ids[0]
+                .cpu()
+                .to(torch.int32),
                 "base_topk_logits": topk_logits[0].cpu().to(torch.float16),
                 "base_logsumexp": base_logsumexp[0].cpu().to(torch.float32),
                 "base_top1_match": base_top1_match[0].cpu(),
                 "gold_rank": gold_rank[0].cpu().to(torch.int16),
             }
         )
-        del parallel_hidden, base_logits, topk_logits, topk_ids
+        del (
+            parallel_hidden,
+            base_logits,
+            topk_logits,
+            topk_ids,
+            base_greedy_ids,
+        )
 
     return records
 
@@ -352,6 +370,9 @@ def main() -> None:
         "block_size": args.block_size,
         "draft_positions": args.block_size - 1,
         "top_k": args.top_k,
+        "candidate_zero_invariant": (
+            "float32_argmax_equals_sorted_topk_rank0"
+        ),
         "anchors_per_sample": args.anchors_per_sample,
         "continuation_tokens": args.continuation_tokens,
         "attention_implementation": args.attn_implementation,

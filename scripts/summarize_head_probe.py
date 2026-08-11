@@ -99,6 +99,7 @@ def main() -> None:
         grouped[f"{run['head_type']}/{run['normalization']}"].append(run)
 
     summaries: dict[str, Any] = {}
+    accepted_metric = "mean_accepted_draft_tokens_prompt_balanced"
     for key, group in sorted(grouped.items()):
         group.sort(key=lambda item: item["seed"])
         decoder_names = [
@@ -115,7 +116,7 @@ def main() -> None:
                 [
                     float(
                         run["evaluation"][decoder][
-                            "mean_accepted_draft_tokens"
+                            accepted_metric
                         ]
                     )
                     for run in group
@@ -150,12 +151,12 @@ def main() -> None:
         global_vs_map = [
             float(
                 run["evaluation"]["global_survival"][
-                    "mean_accepted_draft_tokens"
+                    accepted_metric
                 ]
             )
             - float(
                 run["evaluation"]["global_map"][
-                    "mean_accepted_draft_tokens"
+                    accepted_metric
                 ]
             )
             for run in group
@@ -163,12 +164,12 @@ def main() -> None:
         global_vs_local_survival = [
             float(
                 run["evaluation"]["global_survival"][
-                    "mean_accepted_draft_tokens"
+                    accepted_metric
                 ]
             )
             - float(
                 run["evaluation"]["local_survival"][
-                    "mean_accepted_draft_tokens"
+                    accepted_metric
                 ]
             )
             for run in group
@@ -176,11 +177,11 @@ def main() -> None:
         global_vs_base = [
             float(
                 run["evaluation"]["global_survival"][
-                    "mean_accepted_draft_tokens"
+                    accepted_metric
                 ]
             )
             - float(
-                run["evaluation"]["base"]["mean_accepted_draft_tokens"]
+                run["evaluation"]["base"][accepted_metric]
             )
             for run in group
         ]
@@ -226,6 +227,10 @@ def main() -> None:
                 "12-prompt test split; this probe may gate data scaling but "
                 "cannot support a paper claim."
             )
+        ),
+        "metric_convention": (
+            "All EAL gate statistics give equal weight to each prompt; anchors "
+            "within a prompt are averaged before prompts are averaged."
         ),
         "input": str(args.input.resolve()),
         "runs": runs,

@@ -1,0 +1,23 @@
+{
+  "route": "direct-safety-gate",
+  "method": "producer-reusing out-of-sample direct safety gate",
+  "status": "ready_for_cpu_implementation",
+  "phase": "complete",
+  "current_round": 3,
+  "ready_threshold": 9.0,
+  "reviewer_agent_id": "/root/binary_direct_gate_method_reviewer",
+  "review_independence": "same-family",
+  "acceptance_status": "provisional",
+  "binding_parent_result": "refine-logs/first-miss-max-regret/DEVELOPMENT_RESULT_TO_CLAIM.md",
+  "initial_proposal": "refine-logs/direct-safety-gate/round-0-initial-proposal.md",
+  "round_1_review": "refine-logs/direct-safety-gate/round-1-review.md",
+  "round_1_refinement": "refine-logs/direct-safety-gate/round-1-refinement.md",
+  "round_2_review": "refine-logs/direct-safety-gate/round-2-review.md",
+  "round_2_refinement": "refine-logs/direct-safety-gate/round-2-refinement.md",
+  "round_3_review": "refine-logs/direct-safety-gate/round-3-review.md",
+  "final_proposal": "refine-logs/direct-safety-gate/FINAL_PROPOSAL.md",
+  "overall_score": 9.1,
+  "verdict": "READY",
+  "cpu_implementation_authorized": true,
+  "gpu_authorized": false
+}

@@ -6,7 +6,7 @@
 
 ## 0. 当前证据状态与执行纪律
 
-截至 2026-07-22，只有两个真实研究实验：
+用户原有实验历史中只有两个真实研究实验：
 
 - `10022338`：候选上限，支持 Gate 1a（candidate availability）通过；
 - `10022436`：DFlash/Domino eager 基线，属于真实但 development-grade 的
@@ -19,12 +19,18 @@
 - `development`：可用于内部 gate/hyperparameter 选择，不能支持论文 claim；
 - `formal`：冻结协议、数据、代码 revision 后的论文证据。
 
-当前阶段不是“Gate 1 全部通过”，而是：
+在冻结这个历史边界之后，新运行的受控 development follow-up 得到：
 
-1. Gate 1a 已通过；
-2. Gate 0 数值/缓存正确性尚待闭环；
-3. Gate 1b 同锚点 Domino 对照尚待完成；
-4. 还没有任何 trained-SPH 有效性结果。
+1. Gate 0 已由 `10034918` 关闭：same-shape 严格复现，跨 shape/backend
+   分歧全部落在实测 bf16 near-tie 误差包络内；
+2. Gate 1a 与 Gate 1b 均通过；同 anchor 的 K16 oracle 比 Domino 高
+   3.855 tokens，95% CI `[3.449, 4.272]`；
+3. `10035142` 与 `10035188` 两轮三 seed 小样本 probe 均未提高 held-out EAL；
+4. `10035245` 显示当前 head 主要改变不可达 suffix，不能继续在已观察的
+   `probe_v1` test 上调参；
+5. Phase 3 v3 已冻结 train / validation-select / validation-gate / reserved-test，
+   正在执行一次预注册的 2k-prompt scale-up；
+6. 仍没有任何可支持论文 claim 的 trained-SPH 有效性或正式 latency 结果。
 
 ## 1. 最终交付物
 
@@ -97,12 +103,11 @@ dflash-iclr/
 ├── pyproject.toml            # SPH Python package
 ├── docs/
 │   ├── method.md             # 数学动机与方法定义
-│   ├── experiment_log.md     # 每次正式实验的结论日志（后续创建）
+│   ├── experiment_log.md     # 每次实验/诊断的结论与证据等级
 │   └── paper_outline.md      # 论文提纲（进入写作阶段创建）
 ├── src/sph/
-│   ├── survival_path_head.py # 当前 tensor 原型
-│   ├── data.py               # canonical block dataset（后续）
-│   ├── losses.py             # CRF/survival/calibration losses（后续）
+│   ├── survival_path_head.py # scorer、CRF、loss 与 decoder
+│   ├── data.py               # canonical block dataset 与 exact-context 校验
 │   ├── integration.py        # DFlash 推理集成（后续）
 │   └── kernels/              # Triton kernels（通过 gate 后创建）
 ├── tests/                    # CPU/GPU correctness tests
@@ -118,11 +123,12 @@ dflash-iclr/
 
 | 里程碑 | 预计时间 | 交付物 | 继续条件 |
 |---|---:|---|---|
-| G0 正确性 | 1–2 天 | 固定序列下 full/cache/block/backend logit 误差报告 | 同 shape 可复现；跨 shape 分歧均落在实测误差包络内 |
+| G0 正确性 | **已通过** | `10034918` full/cache/block/backend 误差报告 | 同 shape 复现；0 个 unexplained disagreements |
 | G1a Candidate availability | 已完成 | `10022338` top-$K$ coverage 与 oracle EAL | **通过**，K16 为主配置 |
-| G1b Same-anchor ceiling | 1 天 | 同 anchor 的 DFlash/oracle/Domino 配对结果 | K16 oracle 显著超过 matched-horizon Domino |
-| M2 Development probe | 1–2 天 | no-mixer local/global 三 seed 小样本结果 | 只决定是否扩数据，不形成 claim |
-| M3 正式数据与训练 | 1–2 周 | 去污染训练集、数百 prompt test、学习曲线 | global 与 survival 在 held-out 上有独立增益 |
+| G1b Same-anchor ceiling | **已通过** | `10034919` 同 anchor DFlash/oracle/Domino | K16 oracle +3.855，CI 排除 0，三域为正 |
+| M2 Development probe | **已完成、未通过** | `10035142/10035188/10035245` | 停止 `probe_v1` 调参；只允许一次 clean-data scale-up |
+| M3 Tier-1 数据与训练 | **执行中** | `10035436/10035437`，2k train + 独立 select/gate | survival 相对 MAP ≥0.2、相对 base ≥0.1，三 seed 方向一致 |
+| M3b 正式测试 | Tier-1 gate 后 | 600 reserved prompts，一次性 unseal | 开发配置完全冻结后才采集/评估 |
 | G2 离线可行性 | M3 后 | 三 seed、cluster CI、跨域真实 EAL | 不牺牲首 token，主要域一致 |
 | M4 Eager 集成 | 2–4 天 | 完整单链生成与组件计时 | correctness gate 保持通过 |
 | G3 端到端价值 | M4 后 | 2048-token matched EAL/TPS/latency | 吞吐 CI 优于最强单链 baseline |
@@ -285,6 +291,7 @@ domain                    math | code | chat
 prompt_token_count        int
 anchor_offset             int
 anchor_token_id           int
+context_ids_before_anchor int32[variable]  # 精确重放，不跨硬件重新生成
 gold_ids                  int32[L]
 parallel_hidden           bf16[L, D]
 base_topk_ids             int32[L, 64]
@@ -296,7 +303,11 @@ base_top1_match           bool[L]
 metadata                  checkpoint/config revisions
 ```
 
-数据按 1–2 GB shard 保存，先写临时文件，完成校验后原子 rename，避免中断产生半个 shard。
+format v2 起，target/draft 全部顶层文件、collector、manifest 和每个 shard 都保存
+SHA256；shard 先写临时文件再原子 rename，完整成功后才产生 `metadata.json`。
+中断集合只保留 `INCOMPLETE.json`，训练器和对比脚本不得读取。same-anchor
+评估必须使用保存的 context IDs，不再通过 target.generate 重建。该协议已由
+`10035297/10035299` smoke 验证。
 
 ### 8.4 数据切分
 
@@ -307,14 +318,26 @@ metadata                  checkpoint/config revisions
 
 现有 `prompts_v1` 只有 96 prompts（75/9/12，约 600/72/96 blocks），并且
 来源是 GSM8K/MATH500/HumanEval/MBPP/MT-Bench 的评测 prompts。它固定命名
-为 `probe_v1` 语义，只能用于 Gate 1 与 development learnability probe。
+为 `probe_v1` 语义，只能用于 Gate 1 与已经完成的 development learnability
+probe。其 12-prompt test 已观察，禁止继续用于调参或选择方法。
+
+Phase 3 v3 固定为：
+
+- 2,000 training prompts：GSM8K-train 667、CodeAlpaca 667、ShareGPT 666；
+- 150 `validation_select` prompts：每域 50，只用于 epoch/checkpoint 选择；
+- 150 `validation_gate` prompts：每域 50，只在选择完成后评一次；
+- 600 `reserved_test` prompts：每域 200，开发 gate 前不采集、不评估；
+- 训练和 benchmark 全池做 NFKC/lowercase/whitespace 精确去重，以及 8-gram
+  Jaccard ≥0.5 排除；所有 split 按 prompt 划分；
+- validation gate、selection、training 依次预留，使未来 5k/10k train 是当前
+  2k 的嵌套扩展，不改变 held-out prompts。
 
 正式训练按学习曲线逐级扩展：
 
 1. 2k disjoint training prompts × 8 anchors，约 16k blocks；
 2. 5k prompts，约 40k blocks；
 3. 10k prompts，约 80k blocks；
-4. 独立 validation/test，各至少数百 prompts，且正式 benchmark 从不训练。
+4. 独立 select/gate/test，各至少数百 prompts，且正式 benchmark 从不训练。
 
 只有学习曲线仍在上升时才扩大下一档，避免盲目采集。
 
@@ -367,15 +390,25 @@ learned selector 能找到它，也不能与不同分布的在线 Domino EAL 直
 跳过。主统计使用 prompt-cluster bootstrap。K16 oracle 相比 matched-horizon
 Domino 的 point gain 必须至少达到 `max(0.5 token, 10%)`，且 95% CI 排除 0。
 
+`10034919` 已在 `10022338` 的全部 768 个 anchors 上完成该比较，
+且 anchor/gold 逐 token 完全匹配。K16 oracle 为 11.178，Domino
+on-policy 为 7.323，配对差值为 +3.855 accepted draft tokens，
+prompt-cluster 95% CI 为 `[3.449, 4.272]`；math/code/chat 三域均为正。
+因此 Gate 1b 已通过。
+
 ### 9.4 Gate 1 总判定
 
-推荐的继续条件：
+继续条件与当前判定：
 
 1. Gate 1a 与 Gate 1b 均通过；
 2. $K=16$ oracle EAL 在相同 anchors/horizon 上至少比 Domino 高 0.5 token，或者高 10%（取更严格者）；
 3. 主要 headroom 不只来自一个数据集；
 4. 从 $K=16$ 增加到 $K=32$ 的收益与预估额外延迟仍有合理 Pareto；
 5. 第 1–3 位的 candidate coverage 足够高，因为它们决定大部分 EAL。
+
+第 1–3 项已由 `10022338/10034919` 满足，因此允许进入只训练
+frozen-DFlash head 的 development 阶段。第 4–5 项仍需随学习曲线和
+latency 测量持续报告；Gate 1 通过不等于 learned selector 有效。
 
 若不满足：停止 SPH 主线。可记录失败结论，但不继续做 GPU kernel。不能通过使用 DDTree top-$K$ recall 替代该 gate。
 
@@ -881,6 +914,8 @@ Tree 方法不属于 proposed scope，但可以在 related results 中报告 EAG
 
 ### Step 1：Gate 0 数值与缓存等价性
 
+**已完成：** `10034918` 通过，0 个 unexplained top-1 disagreements。
+
 - 固定同一 teacher-forced token sequence；
 - 比较 full-prefix、cached-single、cached-block；
 - 比较 eager 与 SDPA；
@@ -888,6 +923,9 @@ Tree 方法不属于 proposed scope，但可以在 related results 中报告 EAG
 - 跨 shape/backend 的 top-1 分歧必须由实测 top-2 logit 误差包络解释。
 
 ### Step 2：Gate 1b same-anchor ceiling
+
+**已完成：** `10034919` 通过，K16 oracle 相对 Domino
++3.855 accepted tokens，95% CI `[3.449, 4.272]`。
 
 - 重用 `10022338` immutable shards；
 - 重建每个 prefix 并逐 token 校验 anchor/gold；
@@ -897,6 +935,10 @@ Tree 方法不属于 proposed scope，但可以在 related results 中报告 EAG
 
 ### Step 3：development learnability probe
 
+**已完成且未通过：** `10035142` 的 NLL-only 与 `10035188` 的
+NLL+survival auxiliary 均未提高 held-out EAL；`10035245` 证明变化
+主要发生在不可达 suffix。`probe_v1` 已封存，不得继续调参。
+
 - 当前 75/9/12 prompt split；
 - no-mixer、K16、rank32；
 - local/absorbing-CRF 两种训练 normalization，seed 0/1/2；
@@ -904,6 +946,11 @@ Tree 方法不属于 proposed scope，但可以在 related results 中报告 EAG
 - 结果只能决定是否扩数据，不能进入论文主表。
 
 ### Step 4：正式数据与 Gate 2
+
+**当前阶段：** Phase 3 v3 已冻结 2,000 train、150
+`validation_select`、150 `validation_gate` 和 600 `reserved_test`
+prompts。`10035436` 采集 exact-context blocks；`10035437` 仅是两个
+预注册 loss 配置的三 seed development gate，不是“最终模型训练”。
 
 - 建立去污染的 2k/5k/10k prompt 学习曲线；
 - 同 scorer 比较 local greedy、local survival、global MAP、global survival；
@@ -947,12 +994,14 @@ Tree 方法不属于 proposed scope，但可以在 related results 中报告 EAG
 
 ## 23. 立即下一步
 
-立即执行三个有依赖关系的作业：
+当前只等待两个 Slurm 作业，不需要会话常驻：
 
-1. `scripts/slurm/gate0_target_equivalence.sbatch`；
-2. `scripts/slurm/gate1b_same_anchor.sbatch`；
-3. 仅在前两项成功后运行 `scripts/slurm/head_probe_factorial.sbatch`。
+1. `10035436`：采集 Phase 3 tier-1 exact-context train/select/gate blocks；
+2. `10035437`：`afterok:10035436` 依赖的 NLL-only 和
+   NLL+0.1-survival 两组三 seed development 训练。
 
-前两项关闭正确性和可比性缺口；第三项只测试“selector 是否显示可学习
-信号”。在正式去污染训练数据建立以前，不启动 full head sweep、在线集成或
-GPU kernel。
+训练只用 `validation_select` 选 checkpoint，然后在 `validation_gate`
+上评一次。只有 global-survival 相对同 scorer 的 global-MAP 平均
+至少 +0.2 token、相对 base 至少 +0.1 token，且每颗 seed 方向一致，
+才扩大数据。失败则修改 scorer/目标或终止主线；在此之前不解封
+formal test，不做在线集成或 GPU kernel。

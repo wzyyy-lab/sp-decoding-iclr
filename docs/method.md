@@ -514,14 +514,18 @@ PYTHONPATH=src python -m unittest discover -s tests -v
 当前结果（2026-07-22）：
 
 ```text
-Ran 20 tests
+Ran 27 tests
 OK
 ```
 
 其中包括 variable-length prefix sample space 的 brute-force partition、
 prefix-censored NLL、有限梯度、candidate+OTHER 归一化以及 residual=0 精确
-恢复 DFlash。训练器已能读取 canonical shards，但现有训练运行全部只是
-plumbing smoke；尚没有可声称有效的 trained-SPH EAL 或 GPU latency 收益。
+恢复 DFlash。训练器已实现 frozen-feature 训练、独立 validation
+checkpoint 选择、三 seed 汇总和 reserved-test 封存。两轮小数据
+development probe（`10035142/10035188`）已经真正训练，但均未提高
+held-out EAL；它们是负结果，不是 plumbing smoke。因此尚没有可声称
+有效的 trained-SPH EAL 或 GPU latency 收益。当前排队的 Phase 3 tier-1
+作业只是 clean-data learnability gate，不是最终模型或论文主表训练。
 
 ---
 

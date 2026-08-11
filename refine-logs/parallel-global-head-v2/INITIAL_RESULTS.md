@@ -1,0 +1,3 @@
+# Initial Experiment Results（current）
+
+当前版本：[INITIAL_RESULTS_20260810_143000.md](INITIAL_RESULTS_20260810_143000.md)

@@ -1,0 +1,12 @@
+{
+  "phase": "review",
+  "round": 4,
+  "agent_id": "/root/fbsa_refine_review",
+  "last_score": 7.35,
+  "last_verdict": "REVISE",
+  "status": "in_progress",
+  "timestamp": "2026-08-06T14:17:05+08:00",
+  "route": "prospective-v2",
+  "proposal": "refine-logs/prospective-v2/round-3-refinement.md",
+  "review": null
+}

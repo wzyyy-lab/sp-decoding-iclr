@@ -1,0 +1,38 @@
+{
+  "status": "completed",
+  "job_id": "10158835",
+  "host": "gpu3-9",
+  "device": "NVIDIA A40",
+  "shape": {
+    "batch": 1,
+    "corrected_positions": 15,
+    "candidates": 16,
+    "modes": 8,
+    "width": 512,
+    "feed_forward_width": 1024,
+    "global_layers": 2,
+    "vocab_size": 151936
+  },
+  "parameters": {
+    "plc_trainable": 5928960,
+    "plc_active": 45479936,
+    "domino_active": 50823168,
+    "plc_fraction_of_domino": 0.8948662153449387
+  },
+  "runtime_memory_bytes": {
+    "projected_lexical_table": 155582464,
+    "domino_gru_input_table": 933494784
+  },
+  "latency_ms_per_block": {
+    "plc_eager": 1.779568634033203,
+    "plc_cuda_graph_complete_head": 0.5327360153198242,
+    "domino_cuda_graph_complete_head": 2.249958343505859,
+    "plc_over_domino": 0.23677594603361457,
+    "gate_limit_0.8x_domino": 1.7999666748046874
+  },
+  "checks": {
+    "graph_matches_eager_tokens": true,
+    "gate0_pass": true
+  },
+  "interpretation": "Random PLC weights are intentional: Gate 0 tests the complete production-shape architecture before spending compute on imitation."
+}

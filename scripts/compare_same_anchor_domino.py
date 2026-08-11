@@ -43,6 +43,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--matched-horizon", type=int, default=15)
     parser.add_argument("--oracle-k", type=int, nargs="+", default=[8, 16])
+    parser.add_argument(
+        "--split",
+        help=(
+            "Optional manifest split filter applied after verifying the "
+            "canonical collection's immutable source manifest."
+        ),
+    )
+    parser.add_argument(
+        "--allow-missing-canonical-samples",
+        action="store_true",
+        help=(
+            "Explicitly restrict evaluation to the manifest/canonical "
+            "intersection when selected manifest samples produced no canonical "
+            "blocks. Missing sample IDs are recorded in the output report."
+        ),
+    )
     parser.add_argument("--max-samples", type=int)
     parser.add_argument("--bootstrap-samples", type=int, default=10_000)
     parser.add_argument("--seed", type=int, default=0)
@@ -221,10 +237,19 @@ def paired_summary(
     draws: int,
     seed: int,
 ) -> dict[str, Any]:
+    grouped: dict[str, list[float]] = defaultdict(list)
+    round_differences = []
+    for record in block_results:
+        difference = float(record[left]) - float(record[right])
+        round_differences.append(difference)
+        grouped[record["sample_id"]].append(difference)
+    prompt_balanced_difference = mean(
+        [mean(values) for values in grouped.values()]
+    )
     return {
-        "mean_difference": mean(
-            [record[left] - record[right] for record in block_results]
-        ),
+        "mean_difference": prompt_balanced_difference,
+        "mean_difference_prompt_balanced": prompt_balanced_difference,
+        "mean_difference_round_weighted": mean(round_differences),
         "ci95_prompt_cluster_bootstrap": cluster_bootstrap_difference(
             block_results, left, right, draws=draws, seed=seed
         ),
@@ -267,8 +292,17 @@ def main() -> None:
     if any(k < 1 or k > saved_k for k in args.oracle_k):
         raise ValueError(f"oracle K must be within the saved top-{saved_k}")
 
+    if args.split is not None:
+        manifest = [
+            record
+            for record in manifest
+            if str(record.get("split")) == args.split
+        ]
+        if not manifest:
+            raise ValueError(f"manifest contains no split {args.split!r}")
     if args.max_samples is not None:
         manifest = manifest[: args.max_samples]
+    requested_samples = len(manifest)
     selected_ids = {record["sample_id"] for record in manifest}
     canonical_records = [
         record
@@ -278,9 +312,17 @@ def main() -> None:
     grouped_canonical: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for record in canonical_records:
         grouped_canonical[record["sample_id"]].append(record)
-    missing = selected_ids - grouped_canonical.keys()
+    missing = sorted(selected_ids - grouped_canonical.keys())
     if missing:
-        raise ValueError(f"canonical collection is missing samples: {sorted(missing)}")
+        if not args.allow_missing_canonical_samples:
+            raise ValueError(f"canonical collection is missing samples: {missing}")
+        manifest = [
+            record
+            for record in manifest
+            if record["sample_id"] in grouped_canonical
+        ]
+    if not manifest:
+        raise ValueError("no manifest samples have canonical blocks")
     stored_context_flags = {
         "context_ids_before_anchor" in record for record in canonical_records
     }
@@ -488,13 +530,13 @@ def main() -> None:
         seed=args.seed + 102,
     )
     domino_mean = overall["domino_onpolicy"][
-        "mean_accepted_draft_tokens_round_weighted"
+        "mean_accepted_draft_tokens_prompt_balanced"
     ]
     threshold = max(0.5, 0.10 * domino_mean)
     for k in sorted(set(args.oracle_k)):
         oracle = f"dflash_oracle_k{k}"
         difference = overall[oracle][
-            "mean_accepted_draft_tokens_round_weighted"
+            "mean_accepted_draft_tokens_prompt_balanced"
         ] - domino_mean
         interval = cluster_bootstrap_difference(
             block_results,
@@ -562,6 +604,9 @@ def main() -> None:
         "attention_implementation": args.attn_implementation,
         "dtype": "bfloat16",
         "matched_horizon": args.matched_horizon,
+        "split_filter": args.split,
+        "requested_samples_before_missing_filter": requested_samples,
+        "missing_canonical_samples": missing,
         "samples": len(manifest),
         "blocks": len(block_results),
         "seconds": time.perf_counter() - start_time,

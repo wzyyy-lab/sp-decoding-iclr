@@ -12,6 +12,10 @@ outputs/
 runs/
 wandb/
 
+# Local ARIS session state and compute ledgers. Research-facing proposals,
+# reviews, plans, and progress reports live under refine-logs/ instead.
+.aris/
+
 # Profiling output.
 *.nsys-rep
 *.ncu-rep

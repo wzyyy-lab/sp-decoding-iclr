@@ -139,6 +139,40 @@ def load_target_embedding(target: Path) -> torch.Tensor:
         return handle.get_tensor(key)
 
 
+def validate_target_embedding_identity(
+    data_metadata: dict[str, Any], target: Path
+) -> list[dict[str, Any]]:
+    """Bind training-time token embeddings to the collection checkpoint."""
+
+    if int(data_metadata.get("format_version", 1)) < 2:
+        return []
+    expected_records = data_metadata.get("provenance", {}).get("target_files")
+    if not isinstance(expected_records, list):
+        raise RuntimeError("protocol-v2 data is missing target file fingerprints")
+    expected = {str(record["path"]): record for record in expected_records}
+    index_path = target / "model.safetensors.index.json"
+    index = json.loads(index_path.read_text())
+    embedding_shard = str(index["weight_map"]["model.embed_tokens.weight"])
+    required_names = ["config.json", index_path.name, embedding_shard]
+    verified = []
+    for name in required_names:
+        if name not in expected:
+            raise RuntimeError(f"collection fingerprint is missing target file {name}")
+        path = target / name
+        actual = {
+            "path": name,
+            "bytes": path.stat().st_size,
+            "sha256": sha256_file(path),
+        }
+        reference = expected[name]
+        if actual["bytes"] != int(reference["bytes"]):
+            raise RuntimeError(f"training target size differs from collection: {name}")
+        if actual["sha256"] != str(reference["sha256"]):
+            raise RuntimeError(f"training target hash differs from collection: {name}")
+        verified.append(actual)
+    return verified
+
+
 def make_loader(
     dataset: CanonicalBlockDataset,
     *,
@@ -160,6 +194,25 @@ def to_device(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
         key: value.to(device) if isinstance(value, torch.Tensor) else value
         for key, value in batch.items()
     }
+
+
+def assert_prompt_disjoint_splits(
+    named_datasets: dict[str, CanonicalBlockDataset | None],
+) -> None:
+    sample_ids = {
+        name: {str(record["sample_id"]) for record in dataset.records}
+        for name, dataset in named_datasets.items()
+        if dataset is not None
+    }
+    names = list(sample_ids)
+    for left_index, left in enumerate(names):
+        for right in names[left_index + 1 :]:
+            overlap = sample_ids[left] & sample_ids[right]
+            if overlap:
+                examples = sorted(overlap)[:3]
+                raise RuntimeError(
+                    f"prompt leakage between {left} and {right}: {examples}"
+                )
 
 
 def realized_prefix(
@@ -401,6 +454,9 @@ def evaluate(
         report[name]["mean_accepted_draft_tokens_prompt_balanced"] = sum(
             sum(items) / len(items) for items in prompt_values.values()
         ) / len(prompt_values)
+        report[name]["mean_verification_advance_prompt_balanced"] = (
+            report[name]["mean_accepted_draft_tokens_prompt_balanced"] + 1.0
+        )
     report["predicted_global_survival_utility"] = float(
         torch.cat(accumulators["predicted_global_survival_utility"]).mean()
     )
@@ -476,15 +532,21 @@ def main() -> None:
         raise ValueError("formal evidence cannot skip its frozen test split")
     if args.gate_split is not None and args.gate_split == args.validation_split:
         raise ValueError("gate split must differ from checkpoint-selection split")
+    data_metadata_path = args.data / "metadata.json"
+    data_metadata = json.loads(data_metadata_path.read_text())
+    verified_target_embedding_files = validate_target_embedding_identity(
+        data_metadata, args.target
+    )
     run_provenance = {
         "project_commit": git_revision(PROJECT),
         "project_dirty_at_start": git_is_dirty(PROJECT),
-        "data_metadata_sha256": sha256_file(args.data / "metadata.json"),
+        "data_metadata_sha256": sha256_file(data_metadata_path),
         "target_config_sha256": sha256_file(args.target / "config.json"),
         "trainer_sha256": sha256_file(Path(__file__)),
         "head_source_sha256": sha256_file(
             PROJECT / "src" / "sph" / "survival_path_head.py"
         ),
+        "verified_target_embedding_files": verified_target_embedding_files,
         "dflash_commit": git_revision(PROJECT / "third_party" / "dflash"),
         "dflash_dirty_at_start": git_is_dirty(PROJECT / "third_party" / "dflash"),
         "domino_commit": git_revision(PROJECT / "third_party" / "Domino"),
@@ -496,17 +558,29 @@ def main() -> None:
     device = torch.device("cuda:0")
     train_dataset = CanonicalBlockDataset(args.data, split=args.train_split)
     validation_dataset = CanonicalBlockDataset(
-        args.data, split=args.validation_split
+        args.data, split=args.validation_split, verify_integrity=False
     )
     gate_dataset = (
         None
         if args.gate_split is None
-        else CanonicalBlockDataset(args.data, split=args.gate_split)
+        else CanonicalBlockDataset(
+            args.data, split=args.gate_split, verify_integrity=False
+        )
     )
     test_dataset = (
         None
         if args.skip_test
-        else CanonicalBlockDataset(args.data, split=args.test_split)
+        else CanonicalBlockDataset(
+            args.data, split=args.test_split, verify_integrity=False
+        )
+    )
+    assert_prompt_disjoint_splits(
+        {
+            "train": train_dataset,
+            "validation": validation_dataset,
+            "gate": gate_dataset,
+            "test": test_dataset,
+        }
     )
     train_loader = make_loader(
         train_dataset,
@@ -647,7 +721,13 @@ def main() -> None:
             if args.normalization == "absorbing_crf"
             else "local_survival"
         )
-        advance = validation[selection_decoder]["mean_verification_advance"]
+        # Anchors from one prompt are correlated and short generations can
+        # yield fewer anchors.  Select checkpoints with one equal-weight vote
+        # per prompt instead of silently overweighting prompts with more
+        # collected blocks.
+        advance = validation[selection_decoder][
+            "mean_verification_advance_prompt_balanced"
+        ]
         if advance > best_advance:
             best_advance = advance
             torch.save(

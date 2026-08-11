@@ -1,0 +1,20 @@
+{
+  "phase": "complete",
+  "round": 2,
+  "agent_id": "/root/fada_refine_review",
+  "last_score": 9.3,
+  "last_verdict": "PASS",
+  "status": "completed",
+  "timestamp": "2026-08-08T14:17:45+08:00",
+  "route": "domino-beat-v1",
+  "proposal": "refine-logs/domino-beat-v1/round-2-proposal.md",
+  "review": "refine-logs/domino-beat-v1/round-2-review.md",
+  "refinement": "refine-logs/domino-beat-v1/round-1-refinement.md",
+  "drift": "NONE",
+  "hard_target": {
+    "metric": "prompt-balanced accepted draft tokens over 15 same-anchor positions",
+    "released_domino": 7.015792031098153,
+    "first_performance_target": 7.5
+  },
+  "proceed_to_experiment_plan": true
+}

@@ -1,0 +1,7 @@
+# Problem Anchor：全16全局并行单链 Head v2
+
+- **Bottom-line problem：** 在不改变 DFlash 一次并行生成整块这一核心优势的前提下，设计一个轻量 head，显著解决 accepted length 偏低的问题；固定与动态 EAL 都至少达到同作业 released Domino 的 `1.15x`，最终同栈 SGLang 端到端吞吐也至少达到 Domino 的 `1.15x`。
+- **Must-solve bottleneck：** DFlash base Top-1 在当前 full16 disjoint development 上为 `6.0685131195`，Domino 为 `7.2395529640`，目标为 `8.3254859086`。PGCF-v1 虽能同集拟合 Top-16 oracle、且延迟足够低，但 held-out 仅为 `6.1027696793`；它把大量修改浪费在首拒之后，并只修复 `46/946` 个可修首拒。完美只修一次的 oracle 也仅为 `7.4985422741`，而完美修正前两次错误可达 `8.4238338192`。因此新方法必须利用完整16位全局信息，在一次并行输出中学会多位置、相互一致的 clean-prefix 修复，而不是只做首拒 gate 或单点修补。
+- **Non-goals：** 不做 Domino/GRU 式自回归，不做 selected-token feedback，不做串行 target seed/decode，不做 Jacobi 或任何迭代 refinement，不做 beam/tree/trie/forest/multipath，不让 Top-16 变成路径维，不增加 ordinary verifier 之外的在线 target inference，也不在 accepted-length 主机制成立前投入 SGLang 小修小补。
+- **Constraints：** 单次 head 必须同时消费完整 `[B,16,*]` DFlash online features；每个输出位置必须通过无 causal mask 的全局 mixer 看到全部16位；一次产生 `[B,16,16]` scores 并以一次逐位置 argmax 得到唯一 `[B,16]` 序列。Top-16 只作每位置候选轴。训练/选择/held-out prompt 必须隔离，target 信息只作离线标签。新增参数先控制在 `10.75M` 内，并以同 A40、同 BF16、同 batch/block、eager-to-eager 公平 profile 约束成本。
+- **Success condition：** 一个未经 target-feature 泄漏、在新 disjoint held-out 上成立的 full16 global-vs-local 机制信号；固定 EAL 至少 `8.3254859086`、动态 EAL 至少 `1.15x` Domino，三个域不退化；随后同栈 SGLang A40 tokens/s 的 paired 95% CI 下界至少 `1.15x` Domino。任何架构不变量失败均为 hard NO-GO，不能用 oracle、same-set capacity 或 off-spec 系统结果替代。

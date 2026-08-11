@@ -1,82 +1,121 @@
-# DFlash Survival Path Head
+# PARC-16：DFlash 全局并行单链纠错
 
-这是一个面向 DFlash 单链 speculative decoding 的研究工作区。当前方法在
-DFlash top-$K$ candidate lattice 上建立带吸收式 `OTHER` 的全局 prefix-CRF，
-并通过 acceptance-aligned dynamic programming 选择唯一一条 draft sequence。
-Target 仍使用普通 longest-prefix verification，不做 tree verification。
+本仓库是面向 DFlash / Domino speculative decoding 的完整研究工作区。当前主线是
+**PARC-16（Sealed-Heldout Fixed-Reference Parallel Correction）**：DFlash 一次并行
+产生完整 16-token provisional block，轻量 head 在所有 16 个位置和每位置 Top-16
+候选之间做一次全局、非因果混合，然后一次同时输出唯一一条 16-token 序列。
 
-## 从这里开始
+在线路径严格不包含 Domino 式 GRU、自回归 token feedback、串行 target seed、迭代
+refinement、beam/tree/trie/forest 或多路径验证。Target model 只用于离线监督和普通
+speculative verifier。
 
-- [完整执行计划](PLAN.md)：从环境、baseline、canonical 数据、训练、推理集成、GPU kernel、完整实验到 ICLR 稿件的逐步方案。
-- [方法说明](docs/method.md)：为什么错误 suffix 污染不等于额外接受长度损失，以及 SPH/CRF/survival-DP 的推导。
-- [结果注册表](docs/results_registry.json)：机器可读的 evidence tier、artifact hash 与允许支持的主张。
-- [核心实现](src/sph/survival_path_head.py)：low-rank edge scorer、chain CRF、Viterbi 和 survival-DP。
-- [单元测试](tests/test_survival_path_head.py)：包括 brute-force 最优性验证。
+## 当前主线
 
-## 当前状态（2026-07-22）
+- Head：D256 / H8 / L2 / FFN512，新增参数 **2,438,400**，约为 537.427M
+  DFlash draft model 的 **0.454%**。
+- 输入：完整 `H[B,16,2560]`、每位置 base Top-16 logits/IDs、candidate embedding、
+  anchor embedding。
+- Mixer：256 个 position-candidate action nodes 经过无 causal mask 的 full
+  self-attention；每个位置在选 token 前能看到完整 16-position block。
+- 输出：一次 `[B,16,16]` scores，加一次逐位置 argmax，得到唯一 `[B,16]` chain。
+- 训练：90K prompts、独立 5K validation、封存约 5K held-out；180K joint
+  DFlash+PARC updates。训练集 EAL 只作诊断，validation 只选 checkpoint。
+- 硬目标：held-out fixed EAL、dynamic EAL 与最终 A40 SGLang TPS 均至少达到
+  same-job released Domino 的 `1.15x`。
 
-当前只有两项研究实验可用于分析；其余运行都只是环境、数据管线或反向传播
-smoke，禁止进入论文表格或支持方法有效性主张：
+权威边界见 [用户约束合同](refine-logs/parallel-global-head-v1/USER_CONSTRAINT_CONTRACT.md)，
+最终方法见 [FINAL_PROPOSAL](refine-logs/parallel-global-head-v4/FINAL_PROPOSAL.md)，
+完整复现入口见 [实现与 trace 指南](docs/PARC16_IMPLEMENTATION_GUIDE.md)。
 
-- `10022338`：96 prompts、768 canonical blocks 的候选上限实验。结果支持
-  **Gate 1a（候选可用性）通过**，但还没有完成与 Domino 的同锚点 Gate 1b；
-- `10022436`：96 prompts 的 DFlash/Domino eager 基线实验。它是真实基线结果，
-  但由于 256-token、单次运行和数值等价性尚未闭环，仍是 development-grade，
-  不是最终论文 benchmark；
-- `10022278`、`10022310`、`10022330/43`、`10022412`、`10022468` 均标为
-  `non-evidence smoke`；特别是 `10022468` 的 6/6-block 训练只验证管线；
-- absorbing-OTHER prefix-CRF、局部 control、MAP 和 survival decoder 已统一到
-  同一套 edge scores；20 个 CPU 单元测试通过；
-- 当前还没有任何可声称有效的 trained-SPH EAL，也没有正式 latency 结果；
-- Qwen3-4B/8B target 与 DFlash 权重均在本地，4B Domino 权重也已下载；
-- Domino 源码与独立环境位于 `third_party/Domino/`；
-- 每次实验结论和作业号记录在 [experiment log](docs/experiment_log.md)。
+## 当前进度（2026-08-11）
 
-运行 CPU 测试：
+- PARC 架构、fixed-reference gain/harm objective、full16 数据收集、正式 trainer、
+  validation/断点恢复逻辑已经实现。
+- 18 项 PARC focused tests、Python compilation 和两个 Slurm launcher syntax check
+  均通过；独立 experiment-bridge review 对 M1/M2 均给出 GO。
+- 正式 16-way A800 数据任务：Slurm `10169014`，当前 `PENDING (Priority)`。
+- 唯一 180K-step 正式训练：Slurm `10169018`，以 `afterok:10169014` 依赖排队。
+- 当前没有正式 validation 或 held-out 效果数字。旧容量集的 EAL 9.5254 不是验证
+  证据，不能用于声称超过 Domino。
+
+实时记录见
+[FORMAL_RUN_STATUS](refine-logs/parallel-global-head-v4/FORMAL_RUN_STATUS.md)。
+
+## 代码入口
+
+| 内容 | 文件 |
+|---|---|
+| PARC-16 head、全局 action-node mixer、gain/harm loss | `src/sph/parc.py` |
+| 256-node full noncausal attention primitive | `src/sph/parallel_global_candidate_fusion.py` |
+| 正式数据 catalog、prompt/block sampler、验证指标 | `src/sph/parc_training.py` |
+| 270K reserve 的 train/validation/heldout 预划分 | `scripts/build_parc16_split.py` |
+| full16 target/DFlash/Domino trace 收集 | `scripts/collect_parc16_data.py` |
+| 180K joint DFlash+PARC 正式训练与 validation | `scripts/train_parc16.py` |
+| 16-way A800 trace/materialization launcher | `scripts/slurm/parc16_full_data.sbatch` |
+| 正式训练/精确 resume launcher | `scripts/slurm/parc16_joint_train.sbatch` |
+| PARC focused tests | `tests/test_parc.py`, `tests/test_collect_parc16_data.py`, `tests/test_parc_training.py`, `tests/test_build_parc16_split.py` |
+
+`scripts/`、`src/sph/` 和 `tests/` 同时保留此前 PGCF、JAPD、PCLD、GFPR、PLC、
+R048–R056 等路线的完整代码和负面结果诊断，便于追溯为什么最终收敛到 PARC-16；
+这些历史路线不属于当前在线架构。
+
+## 环境
+
+当前验证环境：Python 3.11.15、PyTorch 2.9.1+cu128、Transformers 4.57.1、
+Safetensors 0.7.0、NumPy 2.4.3。安装本仓库实验依赖：
 
 ```bash
-module load anaconda3
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m unittest discover -s tests -v
+python3.11 -m venv .venv
+.venv/bin/pip install -e '.[experiment]'
 ```
 
-## 目录
+官方外部仓库没有复制进本仓库：
 
-```text
-.
-├── PLAN.md
-├── docs/
-│   ├── method.md
-│   └── experiment_log.md
-├── papers/                 # 33 个 PDF，全部保留
-├── scripts/                # manifest、采集、分析、baseline 与 Slurm 入口
-├── src/sph/
-├── tests/
-└── third_party/
-    ├── dflash/             # 官方 DFlash git 仓库
-    └── Domino/             # 官方 Domino git 仓库与 .venv
+```bash
+git clone https://github.com/z-lab/dflash.git third_party/dflash
+git -C third_party/dflash checkout 94e4abc5e0c31b67bc1a9d30f1cc34ece28a8756
+
+git clone https://github.com/jianuo-huang/Domino third_party/Domino
+git -C third_party/Domino checkout 930e5cd823f4bbbaa82ae150acad03928a3a859f
 ```
 
-训练数据、checkpoint、profile 和 benchmark 输出后续统一放入被 `.gitignore` 排除的 `artifacts/`、`checkpoints/` 和 `outputs/`。
+模型目录需提供 `Qwen3-4B`、`Qwen3-4B-DFlash-b16` 和
+`Qwen3-4B-Domino-b16`。集群路径通过两个 Slurm 文件顶部的 `PROJECT`、`ASSETS`、
+`PYTHON` 配置。
 
-## 研究边界
+## 最小代码验证
 
-- proposed method 最终只验证一条 draft sequence；
-- candidate lattice 只存在于低成本 draft-side reranking 内部；
-- 不使用 DDTree trace 训练或证明当前方法；
-- 第一阶段冻结 DFlash，只训练 SPH；
-- 普通 BiHead 是必须比较的 baseline，不是被预先排除的方案；
-- DiffuSpec-style path search 是必须比较的最接近 baseline；
-- 只有 EAL 收益转化为 matched-hardware 的端到端 TPS 收益，才继续作为 ICLR 主线。
+这些检查只防止实现错误，不是效果实验：
 
-## 2026-07-21 清理记录
+```bash
+PYTHONPATH=src:scripts .venv/bin/python -m pytest -q \
+  tests/test_parc.py \
+  tests/test_collect_parc16_data.py \
+  tests/test_parc_training.py \
+  tests/test_build_parc16_split.py
 
-已删除被当前分析否定的 ReFlash/PlanDomino 文档与原型、DDTree trace probes 和 Python caches。所有论文 PDF 均未删除；`papers/` 中的 33 个 PDF 保持原文件名，DFlash/Domino 核心论文路径不变。
+.venv/bin/python -m py_compile \
+  src/sph/parc.py src/sph/parc_training.py \
+  scripts/build_parc16_split.py scripts/collect_parc16_data.py \
+  scripts/train_parc16.py
+```
 
-下一步严格按门控顺序执行：
+## 文档索引
 
-1. `gate0_target_equivalence.sbatch`：固定 token sequence，诊断 full-prefix、
-   cached-single、cached-block、eager/SDPA 的 target logit 等价性；
-2. `gate1b_same_anchor.sbatch`：在 `10022338` 的完全相同 anchors 上比较
-   DFlash top-1、K8/K16 oracle、Domino backbone 与 Domino on-policy GRU；
-3. 前两项通过后，`head_probe_factorial.sbatch` 才运行三 seed 的小规模
-   learnability probe。该 probe 仍明确标记为 development，不能代替正式数据。
+- [完整实现、trace schema 与运行命令](docs/PARC16_IMPLEMENTATION_GUIDE.md)
+- [用户不可变约束](refine-logs/parallel-global-head-v1/USER_CONSTRAINT_CONTRACT.md)
+- [当前问题定义](refine-logs/parallel-global-head-v4/PROBLEM_ANCHOR.md)
+- [最终方法设计](refine-logs/parallel-global-head-v4/FINAL_PROPOSAL.md)
+- [正式实验计划](refine-logs/parallel-global-head-v4/EXPERIMENT_PLAN.md)
+- [实验 tracker](refine-logs/parallel-global-head-v4/EXPERIMENT_TRACKER.md)
+- [full16 几何与 reserve 修订](refine-logs/parallel-global-head-v4/FULL16_GEOMETRY_AND_RESERVE_AMENDMENT_20260810.md)
+- [最新任务状态](refine-logs/parallel-global-head-v4/FORMAL_RUN_STATUS.md)
+- [完整历史实验日志](docs/experiment_log.md)
+- [机器可读结果登记](docs/results_registry.json)
+- [研究产物清单](MANIFEST.md)
+
+## 数据与权重
+
+生成的 trace、训练数据、checkpoint、日志和模型权重可能达到数百 GB，均由
+`.gitignore` 排除。仓库提交的是生成它们所需的完整代码、配置、schema、测试、设计
+文档和进度记录，不提交不可移植的大型二进制产物或密钥。

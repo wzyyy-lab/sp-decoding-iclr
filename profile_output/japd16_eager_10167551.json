@@ -1,0 +1,141 @@
+{
+  "format": "japd_eager_profile_v1",
+  "status": "completed",
+  "job_id": "10167551",
+  "host": "gpu3-9",
+  "device": "NVIDIA A40",
+  "torch": "2.9.1+cu128",
+  "cuda": "12.8",
+  "record": {
+    "index": 587,
+    "sample_id": "gsm8k_train:8ce75de3845d531ee7c6",
+    "domain": "math",
+    "split": "validation_select",
+    "context_length": 193
+  },
+  "execution": {
+    "batch": 1,
+    "positions": 16,
+    "candidates": 16,
+    "compute_dtype": "bfloat16_autocast_with_fp32_lse_and_softmax",
+    "mode": "eager",
+    "warmup": 50,
+    "repeats": 1000,
+    "complete_japd_components": [
+      "base_vocab_gemm",
+      "fp32_top16",
+      "fp32_logsumexp",
+      "candidate_and_anchor_gather",
+      "global_noncausal_head",
+      "per_position_argmax"
+    ]
+  },
+  "parameters": {
+    "japd_trainable": 433852,
+    "dflash_backbone_reference": 537427968,
+    "fraction_of_dflash_backbone": 0.0008072746969506432
+  },
+  "checks": {
+    "full16_hidden": true,
+    "score_shape": [
+      1,
+      16,
+      16
+    ],
+    "japd_identity_matches_base": true,
+    "domino_matches_cached_policy": true,
+    "japd_complete_matches_incremental": true,
+    "domino_complete_matches_incremental": true
+  },
+  "latency_ms": {
+    "base_vocab_gemm": {
+      "mean": 1.178426239490509,
+      "p50": 1.1786240339279175,
+      "p90": 1.1796480417251587,
+      "min": 1.176576018333435,
+      "max": 1.2247040271759033
+    },
+    "fp32_top16_plus_logsumexp": {
+      "mean": 0.29392518422007563,
+      "p50": 0.29388800263404846,
+      "p90": 0.2949120104312897,
+      "min": 0.2908160090446472,
+      "max": 0.3307519853115082
+    },
+    "candidate_plus_anchor_gather": {
+      "mean": 0.03170681554824114,
+      "p50": 0.03174399957060814,
+      "p90": 0.03177599981427193,
+      "min": 0.029759999364614487,
+      "max": 0.048128001391887665
+    },
+    "japd_head_plus_argmax": {
+      "mean": 2.458753410816193,
+      "p50": 2.451456069946289,
+      "p90": 2.475167918205261,
+      "min": 2.4136319160461426,
+      "max": 5.187583923339844
+    },
+    "japd_incremental": {
+      "mean": 2.49003449845314,
+      "p50": 2.4842240810394287,
+      "p90": 2.5077760219573975,
+      "min": 2.4524800777435303,
+      "max": 5.47327995300293
+    },
+    "domino_incremental": {
+      "mean": 3.8273208076953886,
+      "p50": 3.82259202003479,
+      "p90": 3.832832098007202,
+      "min": 3.7959680557250977,
+      "max": 6.267903804779053
+    },
+    "japd_complete": {
+      "mean": 2.7002655618190765,
+      "p50": 2.6951680183410645,
+      "p90": 2.7156511306762696,
+      "min": 2.6603519916534424,
+      "max": 5.472256183624268
+    },
+    "domino_complete": {
+      "mean": 4.2246406412124635,
+      "p50": 4.225024223327637,
+      "p90": 4.226207876205445,
+      "min": 4.219903945922852,
+      "max": 4.262911796569824
+    }
+  },
+  "complete_p50_ratio": 0.6379059328134089,
+  "incremental_p50_ratio": 0.6498794713166433,
+  "memory": {
+    "japd_incremental": {
+      "baseline_allocated": 1972193792,
+      "baseline_reserved": 2004877312,
+      "peak_allocated": 1980872704,
+      "peak_reserved": 2004877312,
+      "incremental_peak_allocated": 8678912
+    },
+    "domino_incremental": {
+      "baseline_allocated": 1972193792,
+      "baseline_reserved": 2004877312,
+      "peak_allocated": 1972823552,
+      "peak_reserved": 2004877312,
+      "incremental_peak_allocated": 629760
+    },
+    "japd_complete": {
+      "baseline_allocated": 1972193792,
+      "baseline_reserved": 2004877312,
+      "peak_allocated": 1996509184,
+      "peak_reserved": 2004877312,
+      "incremental_peak_allocated": 24315392
+    },
+    "domino_complete": {
+      "baseline_allocated": 1972193792,
+      "baseline_reserved": 2004877312,
+      "peak_allocated": 1977685504,
+      "peak_reserved": 2004877312,
+      "incremental_peak_allocated": 5491712
+    }
+  },
+  "development_latency_gate_passed": true
+}
