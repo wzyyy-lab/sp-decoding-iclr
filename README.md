@@ -49,6 +49,7 @@ speculative verifier。
 | 256-node full noncausal attention primitive | `src/sph/parallel_global_candidate_fusion.py` |
 | 正式数据 catalog、prompt/block sampler、验证指标 | `src/sph/parc_training.py` |
 | Open-PerfectBlend 270K reserve 构建 | `scripts/build_open_perfectblend_manifest.py` |
+| prompt 归一化、去重与 n-gram 污染过滤 | `scripts/build_phase3_manifests.py` |
 | 270K reserve 的 train/validation/heldout 预划分 | `scripts/build_parc16_split.py` |
 | trace 共用的 anchor/context feature 工具 | `scripts/collect_canonical_blocks.py` |
 | full16 target/DFlash/Domino trace 收集 | `scripts/collect_parc16_data.py` |
