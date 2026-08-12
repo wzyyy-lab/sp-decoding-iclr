@@ -18,6 +18,7 @@ from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
 
 from sph.parc import (
     PURE_DFLASH_INPUT_LENGTH,
+    greedy_first_topk,
     nonshift_full16_prediction_hidden,
 )
 
@@ -372,12 +373,19 @@ def collect_prompt(
         if hidden.shape != (1, BLOCK_LENGTH, projection_weight.shape[1]):
             raise RuntimeError(f"pure DFlash returned shape {tuple(hidden.shape)}")
         base_logits = target.lm_head(hidden)
-        topk_logits, topk_ids = base_logits.float().topk(
-            CANDIDATES, dim=-1, sorted=True
-        )
+        topk_logits, topk_ids = greedy_first_topk(base_logits, CANDIDATES)
         greedy = base_logits.float().argmax(dim=-1)
+        if not bool(torch.isfinite(topk_logits).all().item()):
+            raise FloatingPointError("non-finite pure-DFlash candidate logits")
         if not torch.equal(greedy, topk_ids[..., 0]):
-            raise RuntimeError("Top16 rank0 differs from pure-DFlash argmax")
+            raise RuntimeError("greedy-first Top16 contract lost pure-DFlash argmax")
+        if bool(
+            (
+                topk_ids.unsqueeze(-1)
+                == topk_ids.unsqueeze(-2)
+            ).triu(diagonal=1).any().item()
+        ):
+            raise RuntimeError("greedy-first Top16 produced duplicate candidate IDs")
         accepted = accepted_length(greedy[0], gold)
         reference_delta, numeric_error = reference_margin_summary(
             hidden=hidden[0],
@@ -395,6 +403,9 @@ def collect_prompt(
                 "reference_topk_ids": topk_ids[0].cpu().to(torch.int32),
                 "reference_topk_logits": topk_logits[0].cpu().to(torch.float16),
                 "reference_proposal_ids": greedy[0].cpu().to(torch.int32),
+                "reference_rank0_tie_rows": int(
+                    topk_logits[0, :, 0].eq(topk_logits[0, :, 1]).sum().item()
+                ),
                 "reference_accepted_length": accepted,
                 "reference_delta_fp32": reference_delta,
                 "numeric_margin_error": numeric_error,
@@ -516,6 +527,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     unused_reserve = 0
     selected_by_group: Counter[tuple[str, str]] = Counter()
     max_numeric_error = 0.0
+    rank0_tie_rows = 0
     started = time.perf_counter()
     for index, sample in enumerate(samples, start=1):
         group = (str(sample["split"]), str(sample["domain"]))
@@ -546,6 +558,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         max_numeric_error = max(
             max_numeric_error,
             max(float(anchor["numeric_margin_error"]) for anchor in record["anchors"]),
+        )
+        rank0_tie_rows += sum(
+            int(anchor["reference_rank0_tie_rows"])
+            for anchor in record["anchors"]
         )
         print(
             f"[{index}/{len(samples)}] {record['sample_id']}: "
@@ -589,6 +605,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         },
         "counts_by_domain_split": dict(sorted(counts.items())),
         "max_numeric_margin_error_all_local_splits": max_numeric_error,
+        "greedy_first_top16_contract": True,
+        "reference_rank0_tie_rows": rank0_tie_rows,
         "target_feature_width": len(draft.target_layer_ids)
         * int(target.config.hidden_size),
         "old_15_position_cache_used": False,

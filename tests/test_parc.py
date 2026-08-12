@@ -8,6 +8,7 @@ import torch
 from sph.parc import (
     PARC16Head,
     conditional_gain_loss,
+    greedy_first_topk,
     nonshift_full16_prediction_hidden,
     parc_fixed_reference_loss,
 )
@@ -33,6 +34,33 @@ def test_one_call_full16_identity_and_rank0_gauge() -> None:
     assert model.proposal_ids(ids, output).shape == (2, 16)
     assert torch.equal(output.scores.argmax(-1), logits.argmax(-1))
     assert torch.equal(output.scores[..., 0], torch.zeros_like(output.scores[..., 0]))
+
+
+def test_greedy_first_topk_is_deterministic_under_bf16_ties() -> None:
+    # With more tied maxima than K, raw torch.topk may omit vocabulary argmax
+    # token 0.  The production candidate contract must still keep it at rank 0.
+    logits = torch.zeros(2, 16, 32, dtype=torch.bfloat16)
+    candidate_logits, candidate_ids = greedy_first_topk(logits, 16)
+    greedy = logits.float().argmax(dim=-1)
+    assert torch.equal(candidate_ids[..., 0], greedy)
+    assert torch.equal(
+        candidate_logits, logits.float().gather(-1, candidate_ids)
+    )
+    assert bool(
+        candidate_ids.sort(dim=-1).values.diff(dim=-1).ne(0).all()
+    )
+
+
+def test_greedy_first_topk_preserves_ordinary_topk_set() -> None:
+    logits = torch.randn(3, 16, 40, generator=torch.Generator().manual_seed(19))
+    logits[..., 7] = logits.amax(dim=-1) + 1.0
+    raw_ids = logits.topk(16, dim=-1, sorted=True).indices
+    _, candidate_ids = greedy_first_topk(logits, 16)
+    assert torch.equal(candidate_ids[..., 0], logits.argmax(dim=-1))
+    assert torch.equal(
+        candidate_ids.sort(dim=-1).values,
+        raw_ids.sort(dim=-1).values,
+    )
 
 
 def test_nonshift_full16_drops_anchor_carrier_and_keeps_rows_one_to_sixteen() -> None:

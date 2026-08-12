@@ -25,6 +25,44 @@ EXPECTED_PARAMETER_COUNT = DEFAULT_PARAMETER_COUNT
 PURE_DFLASH_INPUT_LENGTH = BLOCK_LENGTH + 1
 
 
+def greedy_first_topk(
+    logits: Tensor, k: int = CANDIDATES
+) -> tuple[Tensor, Tensor]:
+    """Return Top-K scores with the authoritative vocabulary argmax at rank 0.
+
+    BF16 vocabulary logits can contain exact ties.  ``torch.argmax`` and
+    ``torch.topk`` do not promise the same tie ordering, so using raw Top-K
+    rank 0 as the zero-residual proposal can silently change the DFlash
+    baseline.  This routine preserves the ordinary Top-K set whenever it
+    already contains the greedy token, swaps that token to rank 0, and
+    otherwise inserts it while dropping raw rank K-1.  The latter only occurs
+    when at least K tokens share the maximum score.
+    """
+
+    if logits.ndim < 1:
+        raise ValueError("logits must have a vocabulary axis")
+    vocabulary = int(logits.shape[-1])
+    if not 1 <= k <= vocabulary:
+        raise ValueError(f"k must lie in [1,{vocabulary}]")
+    scores = logits.float()
+    _, raw_ids = scores.topk(k, dim=-1, sorted=True)
+    greedy_ids = scores.argmax(dim=-1, keepdim=True)
+    matches = raw_ids.eq(greedy_ids)
+    present = matches.any(dim=-1, keepdim=True)
+    greedy_slots = matches.to(torch.long).argmax(dim=-1, keepdim=True)
+
+    # If present, swap raw rank 0 with the greedy slot.  If absent, prepend
+    # greedy and retain raw ranks [0, K-2].  Both branches have fixed shape.
+    swapped_ids = raw_ids.scatter(-1, greedy_slots, raw_ids[..., :1])
+    swapped_ids = swapped_ids.scatter(
+        -1, torch.zeros_like(greedy_slots), greedy_ids
+    )
+    inserted_ids = torch.cat([greedy_ids, raw_ids[..., : k - 1]], dim=-1)
+    candidate_ids = torch.where(present, swapped_ids, inserted_ids)
+    candidate_logits = scores.gather(-1, candidate_ids)
+    return candidate_logits, candidate_ids
+
+
 def nonshift_full16_prediction_hidden(raw_hidden: Tensor) -> Tensor:
     """Drop the anchor-carrier row from extended non-shift DFlash raw17 output."""
 

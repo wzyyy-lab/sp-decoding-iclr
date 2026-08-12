@@ -29,6 +29,7 @@ from sph.parc import (
     PARCOutput,
     PURE_DFLASH_INPUT_LENGTH,
     assert_frozen_architecture,
+    greedy_first_topk,
     nonshift_full16_prediction_hidden,
     parc_fixed_reference_loss,
 )
@@ -337,8 +338,8 @@ def forward_blocks(
     for hidden, anchor_token in zip(hidden_rows, anchors, strict=True):
         # Preserve the production batch-1 GEMM and head geometry for every chain.
         base_logits = F.linear(hidden, target_weight)
-        candidate_logits, candidate_ids = base_logits.float().topk(
-            CANDIDATES, dim=-1, sorted=True
+        candidate_logits, candidate_ids = greedy_first_topk(
+            base_logits, CANDIDATES
         )
         anchor_tensor = torch.tensor([anchor_token], dtype=torch.long, device=device)
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
