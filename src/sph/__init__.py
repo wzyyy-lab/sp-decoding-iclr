@@ -8,6 +8,7 @@ from .parc import (
     PARCLossOutput,
     PARCOutput,
     assert_frozen_architecture,
+    greedy_first_topk,
     nonshift_full16_prediction_hidden,
     parc_fixed_reference_loss,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "PARCLossOutput",
     "PARCOutput",
     "assert_frozen_architecture",
+    "greedy_first_topk",
     "nonshift_full16_prediction_hidden",
     "parc_fixed_reference_loss",
 ]

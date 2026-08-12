@@ -10,7 +10,10 @@
    non-shift 模型，因此 full16 扩展几何固定为 `[anchor] + 16 masks -> raw17 ->
    rows[1:17]`。实现位于 `nonshift_full16_prediction_hidden()`。
 2. 冻结 target LM head 对 16 个 hidden rows 做 base vocabulary GEMM；每位置取
-   FP32 Top-16，得到 `candidate_ids/logits [B,16,16]`。
+   FP32 Top-16，得到 `candidate_ids/logits [B,16,16]`。BF16 并列最大值时，
+   `greedy_first_topk()` 强制普通 vocabulary `argmax` 位于 rank 0，同时保持候选
+   唯一；collector 与 trainer 共用该实现，zero-residual identity 不依赖
+   `torch.topk` 的未定义 tie ordering。
 3. `PARC16Head` 对每个 `(position, candidate)` 建立一个 action node，共 256 个。
    Node 包含当前位置 hidden、candidate 与 rank-0 embedding delta、anchor、position、
    rank，以及 centered logit/log-prob/gap/rank/entropy 五个在线标量。
@@ -158,9 +161,11 @@ prompt-balanced metrics 和 terminal-state semantics。
 
 ## 9. 当前状态
 
-截至 2026-08-11：focused tests 18 passed；独立 code review 对 M1/M2 均为 GO。
-正式数据 job `10169014` 仍因 A800 priority 排队；正式训练 job `10169018` 以
-`afterok:10169014` 依赖排队。尚无正式 validation/held-out EAL。
+截至 2026-08-12：focused tests 22 passed；独立 code review 对 M1/M2 均为 GO。
+首投 `10169014` 暴露并列 Top-16 ordering 错误且没有发布数据；修复后的真实模型
+检查 `10186345` 以 12 prompts/96 blocks 完成并记录 94 个 tie rows。正式数据 job
+`10186352` 等待 A800 priority；正式训练 job `10186353` 以
+`afterok:10186352` 依赖排队。尚无正式 validation/held-out EAL。
 
 ## 10. 发布范围
 

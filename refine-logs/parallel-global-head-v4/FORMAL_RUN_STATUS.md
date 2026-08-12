@@ -1,6 +1,6 @@
 # PARC-16 Formal Run Status
 
-Updated: 2026-08-11 Asia/Shanghai
+Updated: 2026-08-12 Asia/Shanghai
 
 ## Frozen scientific path
 
@@ -28,22 +28,28 @@ Updated: 2026-08-11 Asia/Shanghai
   Validation is first read at step 10K for checkpoint selection.
 - Scientific stop reasons are terminal and cannot be converted into resumable
   scheduler interruptions.
-- Focused verification: 18 tests passed; Python compilation and both Slurm
+- Focused verification: 22 tests passed; Python compilation and both Slurm
   syntax checks passed.
 - Fresh experiment-bridge review: M1 GO, M2 GO; no standalone GPU smoke.
+- The first materialization attempt `10169014` failed before publishing data:
+  raw BF16 `topk` and vocabulary `argmax` used different tie orderings. The
+  shared collector/trainer contract now places the authoritative greedy token
+  at rank 0, preserves unique candidates, and records tied rows. Real-model
+  repair preflight `10186345` completed `0:0` on an A40 with 12 prompts / 96
+  blocks and observed 94 tied rank-0 rows, confirming both the cause and fix.
 
 ## Active job
 
-- Formal materialization array: Slurm `10169014`.
+- Formal materialization array: Slurm `10186352`.
 - Shape: 16 one-A800 tasks on `i64m1tga800u`.
 - Output root:
-  `artifacts/canonical/parc16_full16_opb270k_reserve_10169014`.
-- Current scheduler state (2026-08-11): all tasks remain pending for A800
-  priority; no task has allocated a node and no failure has occurred.
-- Formal 180K-step training job: Slurm `10169018`, dependency
-  `afterok:10169014`.
+  `artifacts/canonical/parc16_full16_opb270k_reserve_10186352`.
+- Current scheduler state (2026-08-12): all tasks are pending for A800
+  priority.
+- Formal 180K-step training job: Slurm `10186353`, dependency
+  `afterok:10186352`.
 - Training output:
-  `artifacts/models/parc16_joint_formal_10169014`.
+  `artifacts/models/parc16_joint_formal_10186352`.
 - The dependency can launch only after all 16 collectors exit successfully;
   the trainer then independently requires exactly 90K train and 5K validation
   prompts before allocating the optimizer.

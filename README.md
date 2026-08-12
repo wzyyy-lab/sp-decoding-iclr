@@ -27,14 +27,18 @@ speculative verifier。
 最终方法见 [FINAL_PROPOSAL](refine-logs/parallel-global-head-v4/FINAL_PROPOSAL.md)，
 完整复现入口见 [实现与 trace 指南](docs/PARC16_IMPLEMENTATION_GUIDE.md)。
 
-## 当前进度（2026-08-11）
+## 当前进度（2026-08-12）
 
 - PARC 架构、fixed-reference gain/harm objective、full16 数据收集、正式 trainer、
   validation/断点恢复逻辑已经实现。
-- 18 项 PARC focused tests、Python compilation 和两个 Slurm launcher syntax check
+- 22 项 PARC focused tests、Python compilation 和两个 Slurm launcher syntax check
   均通过；独立 experiment-bridge review 对 M1/M2 均给出 GO。
-- 正式 16-way A800 数据任务：Slurm `10169014`，当前 `PENDING (Priority)`。
-- 唯一 180K-step 正式训练：Slurm `10169018`，以 `afterok:10169014` 依赖排队。
+- 首次数据任务 `10169014` 因 BF16 并列 logits 的 `topk/argmax` tie ordering
+  不一致而失败，未发布任何数据；共享候选合同已修复。
+- 真实模型修复检查 `10186345` 完成 12 prompts/96 blocks，并实际记录 94 个
+  rank-0 tie rows。
+- 正式 16-way A800 数据任务：Slurm `10186352`，当前 `PENDING (Priority)`。
+- 唯一 180K-step 正式训练：Slurm `10186353`，以 `afterok:10186352` 依赖排队。
 - 当前没有正式 validation 或 held-out 效果数字。旧容量集的 EAL 9.5254 不是验证
   证据，不能用于声称超过 Domino。
 
